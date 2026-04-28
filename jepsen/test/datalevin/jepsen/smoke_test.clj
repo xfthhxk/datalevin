@@ -1172,6 +1172,7 @@
                   :control-backend :sofa-jraft
                   :nodes ["n1" "n2" "n3"]
                   :key-count 4
+                  :schema (:schema workload)
                   :verbose false
                   :datalevin/cluster-id cluster-id
                   :datalevin/nemesis-faults []
