@@ -16,6 +16,21 @@
   (is (= 10 (#'drep/next-ha-follower-sync-lsn 15 10)))
   (is (= 15 (#'drep/next-ha-follower-sync-lsn 15 nil))))
 
+(deftest gap-bootstrap-next-lsn-uses-first-retained-source-lsn-test
+  (is (= 24 (#'drep/ha-gap-bootstrap-next-lsn
+             20
+             {:error :ha/txlog-gap-unresolved
+              :gap-errors [{:data {:error :ha/txlog-gap
+                                   :expected-lsn 20
+                                   :actual-lsn 24}}
+                           {:data {:error :ha/txlog-gap
+                                   :expected-lsn 20
+                                   :actual-lsn 27}}]})))
+  (is (= 20 (#'drep/ha-gap-bootstrap-next-lsn
+             20
+             {:error :ha/txlog-source-behind
+              :source-last-applied-lsn 18}))))
+
 (deftest empty-follower-batch-advances-from-local-floor-test
   (let [reported-floor (atom nil)
         fetched-range  (atom nil)
@@ -159,3 +174,63 @@
     (is (= 9 (get-in result [:state :resume-next-lsn])))
     (is (= [8 "127.0.0.1:19001" 8 1234 8]
            (get-in result [:state :noted])))))
+
+(deftest bootstrap-rejects-installed-copy-below-required-floor-test
+  (let [sync-called? (atom false)
+        result
+        (boot/bootstrap-ha-follower-from-snapshot*
+         {:normalize-ha-bootstrap-retry-state
+          (fn [candidate-m _fallback-m _reopen-info]
+            candidate-m)
+          :ha-local-store-reopen-info
+          (constantly nil)
+          :fetch-ha-endpoint-snapshot-copy!
+          (fn [_db-name _m _source-endpoint _snapshot-dir]
+            {:copy-meta {:snapshot-last-applied-lsn 16
+                         :payload-last-applied-lsn 16}})
+          :validate-ha-snapshot-copy!
+          (fn [_db-name _m _source-endpoint _snapshot-dir copy-meta _required-lsn]
+            copy-meta)
+          :install-ha-local-snapshot!
+          (fn [m _snapshot-dir]
+            {:ok? true
+             :state (assoc m :installed? true)})
+          :raw-local-kv-store
+          (constantly ::kv)
+          :read-ha-local-snapshot-current-lsn
+          (constantly 8)
+          :reconcile-ha-installed-snapshot-state
+          (fn [state snapshot-lsn trusted-install-lsn]
+            {:state (assoc state
+                           :snapshot-lsn snapshot-lsn
+                           :trusted-install-lsn trusted-install-lsn)
+             :installed-lsn 8
+             :verified-floor-lsn 8})
+          :persist-ha-local-applied-lsn!
+          (fn [_state installed-lsn]
+            installed-lsn)
+          :note-ha-bootstrap-installed-state
+          (fn [state installed-lsn source-endpoint snapshot-lsn now-ms
+               persisted-installed-lsn]
+            (assoc state
+                   :noted [installed-lsn
+                           source-endpoint
+                           snapshot-lsn
+                           now-ms
+                           persisted-installed-lsn]))
+          :sync-ha-follower-batch
+          (fn [& _args]
+            (reset! sync-called? true)
+            {:state {}})}
+         "db"
+         {:initial? true}
+         {:leader-endpoint "127.0.0.1:19001"}
+         ["127.0.0.1:19001"]
+         12
+         1234)]
+    (is (false? (:ok? result)))
+    (is (false? @sync-called?))
+    (is (= :ha/follower-snapshot-installed-too-stale
+           (get-in result [:errors 0 :error])))
+    (is (= 11 (get-in result [:errors 0 :data :required-lsn])))
+    (is (= 8 (get-in result [:errors 0 :data :installed-last-applied-lsn])))))

@@ -968,6 +968,33 @@
                :ha/txlog-gap-unresolved}
              (:error (ex-data e))))
 
+(defn- collect-ha-gap-actual-lsns
+  [x]
+  (cond
+    (map? x)
+    (let [actual-lsn (:actual-lsn x)]
+      (into (if (integer? actual-lsn)
+              [(long actual-lsn)]
+              [])
+            (mapcat collect-ha-gap-actual-lsns)
+            (vals x)))
+
+    (sequential? x)
+    (into [] (mapcat collect-ha-gap-actual-lsns) x)
+
+    :else
+    []))
+
+(defn- ha-gap-bootstrap-next-lsn
+  [fallback-next-lsn gap-data]
+  (let [fallback-next-lsn (long fallback-next-lsn)
+        retained-start-lsn
+        (when-let [actuals (seq (filter #(> (long %) fallback-next-lsn)
+                                        (collect-ha-gap-actual-lsns gap-data)))]
+          (apply min actuals))]
+    (long-max2 fallback-next-lsn
+               (long (or retained-start-lsn 0)))))
+
 (defn- ha-leader-endpoint
   [m lease]
   (or (:leader-endpoint lease)
@@ -2129,9 +2156,13 @@
                           (if (contains? (ex-data e) :source-order-dynamic?)
                             (true? (:source-order-dynamic? (ex-data e)))
                             true)
+                          bootstrap-next-lsn
+                          (ha-gap-bootstrap-next-lsn
+                           fallback-next-lsn
+                           (ex-data e))
                           bootstrap (bootstrap-ha-follower-from-snapshot
                                      db-name error-state lease source-order
-                                     fallback-next-lsn
+                                     bootstrap-next-lsn
                                      now-ms)]
                       (if (:ok? bootstrap)
                         (:state bootstrap)

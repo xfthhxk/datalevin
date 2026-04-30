@@ -3402,51 +3402,56 @@
   [lmdb raw-lmdb dest compact?]
   (if (and *wal-copy-backup-pin-enabled?*
            (txlog-write-path-enabled? raw-lmdb))
-    (let [state (txlog/enabled-state raw-lmdb)
-          watermarks (txlog-watermarks-map raw-lmdb state)
-          applied-lsn (long (or (:last-applied-lsn watermarks) 0))
-          snapshot-pin-floor-state (txlog-snapshot-floor-state
-                                    raw-lmdb
-                                    (or (i/env-opts raw-lmdb) {})
-                                    applied-lsn)
-          pin-floor-lsn (long (:floor-lsn snapshot-pin-floor-state))
-          compact? (boolean compact?)
-          started-ms (System/currentTimeMillis)
-          pin-id (str "backup-copy/" started-ms "-"
-                      (java.util.UUID/randomUUID))
-          pin-ttl-ms (long (max 60000
-                                (long (snapshot-max-age-ms raw-lmdb))))
-          pin-expires-ms (long (+ (long started-ms) pin-ttl-ms))]
-      (txlog-pin-backup-floor-state! raw-lmdb
-                                     pin-id
-                                     pin-floor-lsn
-                                     pin-expires-ms)
-      (try
-        (let [context {:lmdb lmdb
-                       :dest dest
-                       :compact? compact?
-                       :pin-id pin-id
-                       :pin-floor-lsn pin-floor-lsn
-                       :pin-expires-ms pin-expires-ms
-                       :applied-lsn applied-lsn}]
-          (maybe-notify-txn-log-copy-backup-pin-observer! context)
-          (maybe-run-txn-log-copy-backup-pin-failpoint! context)
-          (i/copy raw-lmdb dest compact?)
-          (let [completed-ms (System/currentTimeMillis)]
-            {:started-ms started-ms
-             :completed-ms completed-ms
-             :duration-ms (max 0 (- completed-ms started-ms))
-             :compact? compact?
-             :backup-pin {:pin-id pin-id
-                          :floor-lsn pin-floor-lsn
-                          :expires-ms pin-expires-ms}}))
-        (finally
+    (with-write-txn-lock-before-runtime-txlog-state
+      raw-lmdb
+      (fn []
+        (let [state (txlog/enabled-state raw-lmdb)
+              _ (txlog-force-sync! state)
+              _ (force-lmdb-sync-now! raw-lmdb)
+              watermarks (txlog-watermarks-map raw-lmdb state)
+              applied-lsn (long (or (:last-applied-lsn watermarks) 0))
+              snapshot-pin-floor-state (txlog-snapshot-floor-state
+                                        raw-lmdb
+                                        (or (i/env-opts raw-lmdb) {})
+                                        applied-lsn)
+              pin-floor-lsn (long (:floor-lsn snapshot-pin-floor-state))
+              compact? (boolean compact?)
+              started-ms (System/currentTimeMillis)
+              pin-id (str "backup-copy/" started-ms "-"
+                          (java.util.UUID/randomUUID))
+              pin-ttl-ms (long (max 60000
+                                    (long (snapshot-max-age-ms raw-lmdb))))
+              pin-expires-ms (long (+ (long started-ms) pin-ttl-ms))]
+          (txlog-pin-backup-floor-state! raw-lmdb
+                                         pin-id
+                                         pin-floor-lsn
+                                         pin-expires-ms)
           (try
-            (txlog-unpin-backup-floor-state! raw-lmdb pin-id)
-            (catch Exception e
-              (when-let [info-v (i/kv-info raw-lmdb)]
-                (vswap! info-v assoc :copy-last-backup-unpin-error
-                        (.getMessage e))))))))
+            (let [context {:lmdb lmdb
+                           :dest dest
+                           :compact? compact?
+                           :pin-id pin-id
+                           :pin-floor-lsn pin-floor-lsn
+                           :pin-expires-ms pin-expires-ms
+                           :applied-lsn applied-lsn}]
+              (maybe-notify-txn-log-copy-backup-pin-observer! context)
+              (maybe-run-txn-log-copy-backup-pin-failpoint! context)
+              (i/copy raw-lmdb dest compact?)
+              (let [completed-ms (System/currentTimeMillis)]
+                {:started-ms started-ms
+                 :completed-ms completed-ms
+                 :duration-ms (max 0 (- completed-ms started-ms))
+                 :compact? compact?
+                 :backup-pin {:pin-id pin-id
+                              :floor-lsn pin-floor-lsn
+                              :expires-ms pin-expires-ms}}))
+            (finally
+              (try
+                (txlog-unpin-backup-floor-state! raw-lmdb pin-id)
+                (catch Exception e
+                  (when-let [info-v (i/kv-info raw-lmdb)]
+                    (vswap! info-v assoc :copy-last-backup-unpin-error
+                            (.getMessage e))))))))))
     (i/copy raw-lmdb dest compact?)))
 
 (declare wrap-lmdb)

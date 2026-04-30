@@ -405,7 +405,7 @@
                                      (long (or (:payload-last-applied-lsn
                                                 manifest)
                                                0))))
-                          {:keys [state installed-lsn]}
+                          {:keys [state installed-lsn] :as replay}
                           (reconcile-ha-installed-snapshot-state
                            installed-state
                            snapshot-lsn
@@ -422,36 +422,51 @@
                            snapshot-lsn
                            now-ms
                            persisted-installed-lsn)]
-                      (try
-                        (let [sync-res (sync-ha-follower-batch
-                                        db-name installed-state lease
+                      (if (< (long installed-lsn) (long required-lsn))
+                        {:ok? false
+                         :state installed-state
+                         :error {:error :ha/follower-snapshot-installed-too-stale
+                                 :message
+                                 "HA snapshot copy installed below the required follower floor"
+                                 :data {:required-lsn (long required-lsn)
+                                        :snapshot-last-applied-lsn snapshot-lsn
+                                        :installed-last-applied-lsn installed-lsn
+                                        :resume-next-lsn
                                         (unchecked-inc (long installed-lsn))
-                                        now-ms)
-                              next-state (-> (:state sync-res)
-                                             (assoc
-                                              :ha-follower-last-bootstrap-ms
-                                              now-ms
-                                              :ha-follower-bootstrap-source-endpoint
-                                              source-endpoint
-                                              :ha-follower-bootstrap-snapshot-last-applied-lsn
-                                              snapshot-lsn))]
-                          {:ok? true
-                           :state next-state})
-                        (catch Exception e
-                          {:ok? false
-                           :state installed-state
-                           :error {:error (or (:error (ex-data e))
-                                              :ha/follower-snapshot-resume-failed)
-                                   :message (ex-message e)
-                                   :data (merge
-                                          (or (ex-data e) {})
-                                          {:snapshot-last-applied-lsn
-                                           snapshot-lsn
-                                           :installed-last-applied-lsn
-                                           installed-lsn
-                                           :resume-next-lsn
-                                           (unchecked-inc
-                                            (long installed-lsn))})}})))
+                                        :manifest manifest
+                                        :replay replay}}}
+                        (try
+                          (let [sync-res (sync-ha-follower-batch
+                                          db-name installed-state lease
+                                          (unchecked-inc (long installed-lsn))
+                                          now-ms)
+                                next-state (-> (:state sync-res)
+                                               (assoc
+                                                :ha-follower-last-bootstrap-ms
+                                                now-ms
+                                                :ha-follower-bootstrap-source-endpoint
+                                                source-endpoint
+                                                :ha-follower-bootstrap-snapshot-last-applied-lsn
+                                                snapshot-lsn))]
+                            {:ok? true
+                             :state next-state})
+                          (catch Exception e
+                            {:ok? false
+                             :state installed-state
+                             :error {:error (or (:error (ex-data e))
+                                                :ha/follower-snapshot-resume-failed)
+                                     :message (ex-message e)
+                                     :data (merge
+                                            (or (ex-data e) {})
+                                            {:snapshot-last-applied-lsn
+                                             snapshot-lsn
+                                             :installed-last-applied-lsn
+                                             installed-lsn
+                                             :resume-next-lsn
+                                             (unchecked-inc
+                                              (long installed-lsn))
+                                             :manifest manifest
+                                             :replay replay})}}))))
                     {:ok? false
                      :state (:state install-res)
                      :error (:error install-res)}))
