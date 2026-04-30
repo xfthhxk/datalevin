@@ -35,6 +35,29 @@
       (is (= :info (:type result)))
       (is (= :ha/write-indeterminate (:error result))))))
 
+(deftest append-graph-ignores-terminal-micro-op-transactions-test
+  (testing "read-only terminal transactions are uninformative for append graphs"
+    (is (true? (workload.util/append-graph-ignorable-micro-op-txn?
+                {:type :info
+                 :f :txn
+                 :error "Timeout in making request"
+                 :value [[:r 3 nil]]}))))
+
+  (testing "append-only terminal transactions are uninformative without reads"
+    (is (true? (workload.util/append-graph-ignorable-micro-op-txn?
+                {:type :fail
+                 :f :txn
+                 :error :cas-failed
+                 :value [[:append 2 1]]}))))
+
+  (testing "mixed transactions still carry graph information"
+    (is (false? (workload.util/append-graph-ignorable-micro-op-txn?
+                 {:type :info
+                  :f :txn
+                  :error "Timeout in making request"
+                  :value [[:r 3 nil]
+                          [:append 2 1]]})))))
+
 (defn- exact-state-checker-result
   [checker-f expected-value-f op]
   (checker/check

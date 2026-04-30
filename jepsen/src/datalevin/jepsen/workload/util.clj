@@ -62,7 +62,7 @@
 
 (defn read-only-micro-op-txn?
   [op]
-  (and (= :ok (:type op))
+  (and (terminal-op? op)
        (sequential? (:value op))
        (seq (:value op))
        (every? (fn [micro-op]
@@ -71,7 +71,7 @@
 
 (defn append-only-micro-op-txn?
   [op]
-  (and (= :ok (:type op))
+  (and (terminal-op? op)
        (sequential? (:value op))
        (seq (:value op))
        (every? (fn [micro-op]

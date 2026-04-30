@@ -104,11 +104,15 @@
    (if-let [kv-store (store/local-kv-store m)]
      (let [persisted-floor-lsn
            (store/read-ha-local-persisted-lsn kv-store)
+           payload-lsn
+           (store/read-ha-snapshot-payload-lsn m)
+           watermark-lsn
+           (store/read-ha-local-watermark-lsn m)
            candidate-floor-lsn-raw
            (long-max4 snapshot-lsn
                       persisted-floor-lsn
-                      (store/read-ha-local-watermark-lsn m)
-                      (store/read-ha-snapshot-payload-lsn m))
+                      watermark-lsn
+                      payload-lsn)
            candidate-floor-lsn
            (long (if (integer? trusted-max-lsn)
                    (long-min2 candidate-floor-lsn-raw
@@ -119,22 +123,36 @@
             kv-store
             (unchecked-inc (long snapshot-lsn))
             candidate-floor-lsn)
+           tail-last-lsn
+           (long (or (some-> (peek records) :lsn long)
+                     snapshot-lsn))
+           tail-complete?
+           (>= tail-last-lsn candidate-floor-lsn)
+           verified-materialized-lsn
+           (long-max4 snapshot-lsn
+                      payload-lsn
+                      tail-last-lsn
+                      0)
            verified-floor-lsn
-           (long (if (or (= candidate-floor-lsn (long snapshot-lsn))
-                         (seq records))
-                   candidate-floor-lsn
-                   snapshot-lsn))]
+           (long (long-min2 candidate-floor-lsn
+                            verified-materialized-lsn))]
        {:verified-floor-lsn verified-floor-lsn
         :persisted-floor-lsn persisted-floor-lsn
+        :payload-lsn payload-lsn
+        :watermark-lsn watermark-lsn
         :candidate-floor-lsn-raw candidate-floor-lsn-raw
         :candidate-floor-lsn candidate-floor-lsn
         :trusted-max-lsn (some-> trusted-max-lsn long)
+        :tail-last-lsn tail-last-lsn
+        :tail-complete? tail-complete?
         :tail-record-count (count records)})
      {:verified-floor-lsn (long snapshot-lsn)
       :persisted-floor-lsn (long snapshot-lsn)
       :candidate-floor-lsn-raw (long snapshot-lsn)
       :candidate-floor-lsn (long snapshot-lsn)
       :trusted-max-lsn (some-> trusted-max-lsn long)
+      :tail-last-lsn (long snapshot-lsn)
+      :tail-complete? true
       :tail-record-count 0})))
 
 (defn- persist-ha-local-bootstrap-floor!
@@ -366,19 +384,24 @@
                       (install-ha-local-snapshot! current-m snapshot-dir)]
                   (if (:ok? install-res)
                     (let [installed-state (:state install-res)
-                          snapshot-lsn
+                          local-snapshot-lsn
                           (long (max 0
-                                     (long (or (:snapshot-last-applied-lsn
-                                                manifest)
-                                               0))
                                      (long (if-let [kv-store
                                                     (raw-local-kv-store
                                                      installed-state)]
                                              (read-ha-local-snapshot-current-lsn
                                               kv-store)
                                              0))))
+                          manifest-snapshot-lsn
+                          (long (max 0
+                                     (long (or (:snapshot-last-applied-lsn
+                                                manifest)
+                                               0))))
+                          snapshot-lsn
+                          local-snapshot-lsn
                           trusted-install-lsn
                           (long (max snapshot-lsn
+                                     manifest-snapshot-lsn
                                      (long (or (:payload-last-applied-lsn
                                                 manifest)
                                                0))))
