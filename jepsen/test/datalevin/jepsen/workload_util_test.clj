@@ -35,6 +35,16 @@
       (is (= :info (:type result)))
       (is (= :ha/write-indeterminate (:error result))))))
 
+(deftest exception-detail-sanitizes-history-unsafe-values-test
+  (let [opaque (Object.)
+        error  (ex-info "boom"
+                        {:opaque opaque
+                         :nested {:values [1 opaque]}})
+        detail (workload.util/exception-detail error)]
+    (is (= "boom" (:message detail)))
+    (is (= (str opaque) (:opaque detail)))
+    (is (= [1 (str opaque)] (get-in detail [:nested :values])))))
+
 (deftest append-graph-ignores-terminal-micro-op-transactions-test
   (testing "read-only terminal transactions are uninformative for append graphs"
     (is (true? (workload.util/append-graph-ignorable-micro-op-txn?

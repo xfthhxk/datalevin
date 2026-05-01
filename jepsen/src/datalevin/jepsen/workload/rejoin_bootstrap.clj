@@ -47,6 +47,11 @@
 
 (declare with-retrying-leader-conn)
 
+(defn- node-diagnostics
+  [cluster-id logical-node]
+  (workload.util/history-safe
+    (local/node-diagnostics cluster-id logical-node)))
+
 (defn- write-op
   [key-count]
   {:type :invoke
@@ -107,11 +112,11 @@
                                       register-rows-query)]
     (if (= ::local/unavailable rows)
       {:values ::local/unavailable
-       :node-diagnostics (local/node-diagnostics cluster-id logical-node)
+       :node-diagnostics (node-diagnostics cluster-id logical-node)
        :ready? false}
       (let [values (register-values-from-rows rows key-count)]
         {:values values
-         :node-diagnostics (local/node-diagnostics cluster-id logical-node)
+         :node-diagnostics (node-diagnostics cluster-id logical-node)
          :ready? (and (= (long key-count) (count values))
                       (every? integer? values))}))))
 
@@ -129,11 +134,11 @@
                        ::local/unavailable))]
     (if (= ::local/unavailable rows)
       {:values ::local/unavailable
-       :node-diagnostics (local/node-diagnostics cluster-id logical-node)
+       :node-diagnostics (node-diagnostics cluster-id logical-node)
        :ready? false}
       (let [values (register-values-from-rows rows key-count)]
         {:values values
-         :node-diagnostics (local/node-diagnostics cluster-id logical-node)
+         :node-diagnostics (node-diagnostics cluster-id logical-node)
          :ready? (and (= (long key-count) (count values))
                       (every? integer? values))}))))
 
@@ -733,7 +738,8 @@
         :converge
         (assoc op
                :type :ok
-               :value (ensure-converged! test key-count))
+               :value (workload.util/history-safe
+                        (ensure-converged! test key-count)))
 
         (local/with-leader-conn
           test

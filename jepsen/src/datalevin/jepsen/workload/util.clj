@@ -22,13 +22,66 @@
     :info
     :fail))
 
+(def ^:private history-safe-max-depth 16)
+
+(defn history-safe
+  "Returns x as data Jepsen can persist in history files.
+
+  Diagnostic maps can include runtime objects captured in ex-data. Fressian
+  cannot encode those, so keep normal EDN-ish values and stringify opaque
+  handles at the edges."
+  ([x]
+   (history-safe x history-safe-max-depth))
+  ([x depth]
+   (cond
+     (neg? depth)
+     (str x)
+
+     (or (nil? x)
+         (string? x)
+         (keyword? x)
+         (symbol? x)
+         (number? x)
+         (boolean? x)
+         (char? x)
+         (uuid? x))
+     x
+
+     (instance? Throwable x)
+     (cond-> {:message (or (ex-message x)
+                           (.getName (class x)))
+              :class (.getName (class x))}
+       (some? (ex-data x))
+       (assoc :data (history-safe (ex-data x) (dec depth))))
+
+     (map-entry? x)
+     (clojure.lang.MapEntry.
+       (history-safe (key x) (dec depth))
+       (history-safe (val x) (dec depth)))
+
+     (map? x)
+     (into {}
+           (map (fn [[k v]]
+                  [(history-safe k (dec depth))
+                   (history-safe v (dec depth))]))
+           x)
+
+     (sequential? x)
+     (mapv #(history-safe % (dec depth)) x)
+
+     (set? x)
+     (set (map #(history-safe % (dec depth)) x))
+
+     :else
+     (str x))))
+
 (defn exception-detail
   [e]
   (cond-> {:message (or (ex-message e)
                         (.getName (class e)))
            :class (.getName (class e))}
     (map? (ex-data e))
-    (merge (ex-data e))))
+    (merge (history-safe (ex-data e)))))
 
 (defn assoc-exception-op
   ([op e error]
