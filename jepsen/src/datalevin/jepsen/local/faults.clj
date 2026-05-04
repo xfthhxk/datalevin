@@ -60,6 +60,7 @@
   ["HA write admission rejected"
    "HA control command timed out"
    "HA write commit confirmation failed"
+   "Timed out waiting for durable LSN"
    "Timed out waiting for single leader"
    "Socket channel is closed."
    "ClosedChannelException"

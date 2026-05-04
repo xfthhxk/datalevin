@@ -40,3 +40,23 @@
              (d/datoms @conn :eav)))
       (finally
         (d/close conn)))))
+
+(deftest remote-q-placeholder-value-test
+  (let [db-name (str "remote-q-placeholder-" (UUID/randomUUID))
+        conn    (d/get-conn (remote-uri db-name))]
+    (try
+      (is (= #{} (d/q '[:find ?e
+                        :in $
+                        :where [?e :dataset/name _]]
+                      @conn)))
+      (d/transact! conn [{:db/id 1 :dataset/name "foo"}])
+      (is (= #{[1]} (d/q '[:find ?e
+                           :in $
+                           :where [?e :dataset/name _]]
+                         @conn)))
+      (is (= #{[1]} (d/q '[:find ?e
+                           :in $
+                           :where [?e :dataset/name "foo"]]
+                         @conn)))
+      (finally
+        (d/close conn)))))
