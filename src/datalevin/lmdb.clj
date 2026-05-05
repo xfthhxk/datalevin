@@ -386,17 +386,25 @@
   [[db orig-db] & body]
   `(locking (write-txn ~orig-db)
      (let [writing#   (writing? ~orig-db)
+           opened?#   (volatile! false)
            condition# (fn [~'e] (and (resized? ~'e) (not writing#)))]
        (u/repeat-try-catch
            ~c/+in-tx-overflow-times+
            condition#
          (try
-           (let [~db (if writing# ~orig-db (open-transact-kv ~orig-db))]
+           (vreset! opened?# false)
+           (let [~db (if writing#
+                       ~orig-db
+                       (let [db# (open-transact-kv ~orig-db)]
+                         (vreset! opened?# true)
+                         db#))]
              (u/repeat-try-catch
                  ~c/+in-tx-overflow-times+
                  condition#
                ~@body))
-           (finally (when-not writing# (close-transact-kv ~orig-db))))))))
+           (finally
+             (when (and (not writing#) @opened?#)
+               (close-transact-kv ~orig-db))))))))
 
 ;; for shutting down various executors when the last LMDB exits
 (defonce lmdb-dirs (atom #{}))

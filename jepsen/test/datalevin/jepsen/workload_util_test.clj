@@ -130,6 +130,27 @@
     (is (= 0 (:failure-count result)))
     (is (= 1 (:disruption-failure-count result)))))
 
+(deftest identity-upsert-checker-allows-transient-read-back-mismatch-test
+  (let [op      {:f :string-tempid-upsert-ref
+                 :identity/case-id 8}
+        result  (checker/check
+                 (#'identity-upsert/identity-upsert-checker)
+                 {}
+                 (history/history
+                  [(assoc op
+                          :process 0
+                          :type :ok
+                          :value [])
+                   {:process 0
+                    :type :ok
+                    :f :probe
+                    :value {8 (#'identity-upsert/expected-final-state op)}}])
+                 nil)]
+    (is (true? (:valid? result)) (pr-str result))
+    (is (= 0 (:mismatch-count result)))
+    (is (= 1 (:transient-mismatch-count result)))
+    (is (= 0 (:probe-mismatch-count result)))))
+
 (deftest index-consistency-checker-ignores-indeterminate-ops-test
   (let [op     {:f :ref-create
                 :index/case-id 1}

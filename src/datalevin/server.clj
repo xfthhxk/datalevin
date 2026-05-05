@@ -224,7 +224,8 @@
 
 (declare event-loop close-conn store->db-name session-lmdb remove-store
          with-db-runtime-store-swap
-         halt-run session-deps copy-deps dispatch-deps ha-deps)
+         halt-run session-deps copy-deps dispatch-deps ha-deps
+         stop-ha-background-loops!)
 
 (def session-dbi sess/session-dbi)
 
@@ -279,6 +280,7 @@
 
   (stop [server]
     (.set running false)
+    (stop-ha-background-loops! server)
     (.wakeup selector)
     (doseq [skey (.keys selector)] (close-conn skey))
     (.close server-socket)
@@ -683,6 +685,13 @@
 (defn- stop-ha-follower-sync-loop
   [m]
   (sha/stop-ha-follower-sync-loop m))
+
+(defn- stop-ha-background-loops!
+  [^Server server]
+  (doseq [db-name (keys (.-dbs server))]
+    (when-let [m (get (.-dbs server) db-name)]
+      (stop-ha-renew-loop m)
+      (stop-ha-follower-sync-loop m))))
 
 (def ^:private await-ha-loop-stop sha/await-ha-loop-stop)
 

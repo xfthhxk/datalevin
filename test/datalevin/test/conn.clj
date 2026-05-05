@@ -316,6 +316,27 @@
       (finally
         (u/delete-files dir)))))
 
+(deftest test-with-transaction-kv-without-value-compression
+  (let [dir (u/tmp-dir (str "with-tx-kv-no-compress-test-"
+                            (UUID/randomUUID)))]
+    (try
+      (let [db (d/open-kv dir {:wal? false})]
+        (try
+          (d/open-dbi db "a")
+          (let [tx (i/open-transact-kv db)]
+            (try
+              (is (= :transacted
+                     (d/transact-kv tx [[:put "a" :k :v]])))
+              (is (= :v (d/get-value tx "a" :k)))
+              (is (nil? (d/get-value db "a" :k)))
+              (finally
+                (i/close-transact-kv db))))
+          (is (= :v (d/get-value db "a" :k)))
+          (finally
+            (d/close-kv db))))
+      (finally
+        (u/delete-files dir)))))
+
 (deftest test-open-kv-rejects-second-local-handle-in-process
   (let [dir (u/tmp-dir (str "open-kv-duplicate-handle-test-"
                             (UUID/randomUUID)))]

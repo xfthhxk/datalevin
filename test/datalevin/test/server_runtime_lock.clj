@@ -5,7 +5,7 @@
    [datalevin.server :as srv])
   (:import
    [java.util.concurrent ConcurrentHashMap ConcurrentLinkedQueue CountDownLatch
-    TimeUnit]
+    FutureTask TimeUnit]
    [java.util.concurrent.atomic AtomicBoolean]))
 
 (defn- test-server
@@ -97,3 +97,23 @@
           (.countDown release-reader)
           (future-cancel reader)
           (future-cancel remover))))))
+
+(deftest stop-ha-background-loops-cancels-loop-futures-test
+  (let [server             (test-server)
+        ^ConcurrentHashMap
+        dbs                (.-dbs ^datalevin.server.Server server)
+        renew-running?    (AtomicBoolean. true)
+        follower-running? (AtomicBoolean. true)
+        renew-future      (FutureTask. ^Runnable (fn []) nil)
+        follower-future   (FutureTask. ^Runnable (fn []) nil)]
+    (.put dbs
+          "db"
+          {:ha-renew-loop-running? renew-running?
+           :ha-renew-loop-future renew-future
+           :ha-follower-loop-running? follower-running?
+           :ha-follower-loop-future follower-future})
+    (#'srv/stop-ha-background-loops! server)
+    (is (false? (.get renew-running?)))
+    (is (false? (.get follower-running?)))
+    (is (.isCancelled renew-future))
+    (is (.isCancelled follower-future))))

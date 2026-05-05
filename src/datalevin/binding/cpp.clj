@@ -928,7 +928,8 @@
     (.clear start-vp-w)
     (.clear stop-vp-w)
     (.clear k-comp-bf-w)
-    (.clear v-comp-bf-w)
+    (when-some [^ByteBuffer bf v-comp-bf-w]
+      (.clear bf))
     (vreset! write-txn (Rtx. this
                              (Txn/create env)
                              (volatile! 1)
