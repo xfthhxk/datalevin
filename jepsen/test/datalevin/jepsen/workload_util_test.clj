@@ -109,6 +109,27 @@
     (is (= 0 (:failure-count result)))
     (is (= 1 (:indeterminate-count result)))))
 
+(deftest identity-upsert-checker-ignores-node-kill-admission-rejections-test
+  (let [op     {:f :lookup-ref-intermediate
+                :identity/case-id 2}
+        result (checker/check
+                 (#'identity-upsert/identity-upsert-checker)
+                 {:datalevin/nemesis-faults [:node-kill]}
+                 (history/history
+                  [(assoc op
+                          :process 0
+                          :type :ok
+                          :value (#'identity-upsert/expected-states op))
+                   (assoc op
+                          :process 1
+                          :type :fail
+                          :error "Request to Datalevin server failed: \"HA write admission rejected\"")])
+                 nil)]
+    (is (true? (:valid? result)) (pr-str result))
+    (is (= 0 (:mismatch-count result)))
+    (is (= 0 (:failure-count result)))
+    (is (= 1 (:disruption-failure-count result)))))
+
 (deftest index-consistency-checker-ignores-indeterminate-ops-test
   (let [op     {:f :ref-create
                 :index/case-id 1}
