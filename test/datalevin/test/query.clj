@@ -3,12 +3,24 @@
    [datalevin.test.core :as tdc :refer [db-fixture]]
    [clojure.test :refer [deftest testing is use-fixtures]]
    [datalevin.core :as d]
+   [datalevin.query :as q]
+   [datalevin.query.cache :as qcache]
+   [datalevin.query-optimizer :as qo]
    [datalevin.util :as u])
   (:import
    [clojure.lang ExceptionInfo]
    [java.util UUID]))
 
 (use-fixtures :each db-fixture)
+
+(deftest test-query-cache-vars-remain-compatible
+  (is (var? (ns-resolve 'datalevin.query '*cache?*)))
+  (is (var? (ns-resolve 'datalevin.query '*query-cache*)))
+  (is (var? (ns-resolve 'datalevin.query '*plan-cache*)))
+  (is (identical? q/*query-cache* qcache/*query-cache*))
+  (is (identical? q/*plan-cache* qo/*plan-cache*))
+  (binding [q/*cache?* false]
+    (is (false? q/*cache?*))))
 
 (deftest test-instant
   (let [dir (u/tmp-dir (str "test-instant-" (UUID/randomUUID)))
