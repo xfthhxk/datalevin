@@ -73,6 +73,7 @@
 
 (def ^:private write-disruption-faults
   #{:leader-failover
+    :node-kill
     :leader-partition
     :quorum-loss
     :leader-pause

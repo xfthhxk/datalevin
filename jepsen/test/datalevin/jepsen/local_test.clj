@@ -238,6 +238,10 @@
         "Request to Datalevin server failed: \"HA write commit confirmation failed\""]
     (is (true? (boolean
                  (local/expected-disruption-write-failure?
+                   {:datalevin/nemesis-faults [:node-kill]}
+                   "Request to Datalevin server failed: \"HA write admission rejected\""))))
+    (is (true? (boolean
+                 (local/expected-disruption-write-failure?
                    active-test
                    transport-error))))
     (is (true? (boolean
