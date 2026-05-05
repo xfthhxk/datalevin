@@ -45,6 +45,19 @@
     (is (= (str opaque) (:opaque detail)))
     (is (= [1 (str opaque)] (get-in detail [:nested :values])))))
 
+(deftest history-safe-bounds-unbounded-collections-test
+  (let [result (workload.util/history-safe {:values (range)})
+        values (:values result)]
+    (is (= (vec (range 64)) (subvec values 0 64)))
+    (is (true? (:datalevin.jepsen/truncated? (peek values))))
+    (is (= :collection-limit (:datalevin.jepsen/reason (peek values))))))
+
+(deftest history-safe-does-not-stringify-depth-limited-collections-test
+  (let [result  (workload.util/history-safe {:outer [{:inner (range)}]} 1)
+        summary (get-in result [:outer 0])]
+    (is (true? (:datalevin.jepsen/truncated? summary)))
+    (is (= :max-depth (:datalevin.jepsen/reason summary)))))
+
 (deftest append-graph-ignores-terminal-micro-op-transactions-test
   (testing "read-only terminal transactions are uninformative for append graphs"
     (is (true? (workload.util/append-graph-ignorable-micro-op-txn?
