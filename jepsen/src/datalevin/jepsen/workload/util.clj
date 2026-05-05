@@ -23,6 +23,52 @@
     :fail))
 
 (def ^:private history-safe-max-depth 16)
+(def ^:private history-safe-max-items 64)
+
+(defn- primitive-history-value?
+  [x]
+  (or (nil? x)
+      (string? x)
+      (keyword? x)
+      (symbol? x)
+      (number? x)
+      (boolean? x)
+      (char? x)
+      (uuid? x)))
+
+(defn- class-name
+  [x]
+  (when (some? x)
+    (.getName (class x))))
+
+(defn- truncation-summary
+  [reason x]
+  {:datalevin.jepsen/truncated? true
+   :datalevin.jepsen/reason reason
+   :datalevin.jepsen/class (class-name x)})
+
+(defn- collection-truncation-summary
+  [x]
+  (assoc (truncation-summary :collection-limit x)
+         :datalevin.jepsen/limit history-safe-max-items))
+
+(defn- safe-opaque-string
+  [x]
+  (try
+    (str x)
+    (catch Throwable e
+      (str "#<"
+           (class-name x)
+           " threw while stringifying: "
+           (or (ex-message e) (class-name e))
+           ">"))))
+
+(defn- limited-items
+  [xs]
+  (let [limit (long history-safe-max-items)
+        items (doall (take (unchecked-inc limit) xs))]
+    [(take limit items)
+     (> (long (count items)) limit)]))
 
 (defn history-safe
   "Returns x as data Jepsen can persist in history files.
@@ -33,47 +79,51 @@
   ([x]
    (history-safe x history-safe-max-depth))
   ([x depth]
-   (cond
-     (neg? depth)
-     (str x)
+   (let [depth (long depth)]
+     (cond
+       (primitive-history-value? x)
+       x
 
-     (or (nil? x)
-         (string? x)
-         (keyword? x)
-         (symbol? x)
-         (number? x)
-         (boolean? x)
-         (char? x)
-         (uuid? x))
-     x
+       (neg? depth)
+       (truncation-summary :max-depth x)
 
-     (instance? Throwable x)
-     (cond-> {:message (or (ex-message x)
-                           (.getName (class x)))
-              :class (.getName (class x))}
-       (some? (ex-data x))
-       (assoc :data (history-safe (ex-data x) (dec depth))))
+       (instance? Throwable x)
+       (cond-> {:message (or (ex-message x)
+                             (.getName (class x)))
+                :class (.getName (class x))}
+         (some? (ex-data x))
+         (assoc :data (history-safe (ex-data x) (unchecked-dec depth))))
 
-     (map-entry? x)
-     (clojure.lang.MapEntry.
-       (history-safe (key x) (dec depth))
-       (history-safe (val x) (dec depth)))
+       (map-entry? x)
+       (clojure.lang.MapEntry.
+        (history-safe (key x) (unchecked-dec depth))
+        (history-safe (val x) (unchecked-dec depth)))
 
-     (map? x)
-     (into {}
-           (map (fn [[k v]]
-                  [(history-safe k (dec depth))
-                   (history-safe v (dec depth))]))
-           x)
+       (map? x)
+       (let [[items truncated?] (limited-items x)]
+         (cond-> (into {}
+                       (map (fn [[k v]]
+                              [(history-safe k (unchecked-dec depth))
+                               (history-safe v (unchecked-dec depth))]))
+                       items)
+           truncated?
+           (assoc :datalevin.jepsen/truncated
+                  (collection-truncation-summary x))))
 
-     (sequential? x)
-     (mapv #(history-safe % (dec depth)) x)
+       (sequential? x)
+       (let [[items truncated?] (limited-items x)]
+         (cond-> (mapv #(history-safe % (unchecked-dec depth)) items)
+           truncated?
+           (conj (collection-truncation-summary x))))
 
-     (set? x)
-     (set (map #(history-safe % (dec depth)) x))
+       (set? x)
+       (let [[items truncated?] (limited-items x)]
+         (cond-> (set (map #(history-safe % (unchecked-dec depth)) items))
+           truncated?
+           (conj (collection-truncation-summary x))))
 
-     :else
-     (str x))))
+       :else
+       (safe-opaque-string x)))))
 
 (defn exception-detail
   [e]
