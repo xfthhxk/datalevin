@@ -643,39 +643,42 @@
            {:provider-spec provider-spec})))
 
 (defn- openai-compatible-space
-  [spec metadata* dimensions*]
-  (or (when-let [dimensions @dimensions*]
-        {:dimensions dimensions
-         :metadata   (or @metadata*
-                         (reset! metadata*
-                                 (openai-compatible-base-metadata spec
-                                                                  dimensions)))})
-      (locking dimensions*
-        (or (when-let [dimensions @dimensions*]
-              {:dimensions dimensions
-               :metadata   (or @metadata*
-                               (reset! metadata*
-                                       (openai-compatible-base-metadata spec
-                                                                        dimensions)))})
-            (let [vectors (openai-compatible-response-vectors
-                            (perform-openai-compatible-request
-                              spec
-                              [openai-compatible-default-probe-text]))
-                  _       (when-not (= 1 (count vectors))
-                            (raise "OpenAI-compatible embedding probe returned the wrong number of vectors"
-                                   {:vectors (count vectors)}))
-                  dims    (alength ^floats (first vectors))
-                  _       (when-let [expected (openai-compatible-configured-dimensions spec)]
-                            (when-not (= (long expected) (long dims))
-                              (raise "Embedding dimensions do not match the configured OpenAI-compatible provider dimensions"
-                                     {:expected-dimensions expected
-                                      :provider-dimensions dims
-                                      :provider-spec spec})))
-                  metadata (openai-compatible-base-metadata spec dims)]
-              (reset! dimensions* dims)
-              (reset! metadata* metadata)
-              {:dimensions dims
-               :metadata   metadata})))))
+  ([spec metadata* dimensions*]
+   (openai-compatible-space spec metadata* dimensions* nil))
+  ([spec metadata* dimensions* http-client]
+   (or (when-let [dimensions @dimensions*]
+         {:dimensions dimensions
+          :metadata   (or @metadata*
+                          (reset! metadata*
+                                  (openai-compatible-base-metadata spec
+                                                                   dimensions)))})
+       (locking dimensions*
+         (or (when-let [dimensions @dimensions*]
+               {:dimensions dimensions
+                :metadata   (or @metadata*
+                                (reset! metadata*
+                                        (openai-compatible-base-metadata spec
+                                                                         dimensions)))})
+             (let [vectors (openai-compatible-response-vectors
+                             (perform-openai-compatible-request
+                               spec
+                               [openai-compatible-default-probe-text]
+                               http-client))
+                   _       (when-not (= 1 (count vectors))
+                             (raise "OpenAI-compatible embedding probe returned the wrong number of vectors"
+                                    {:vectors (count vectors)}))
+                   dims    (alength ^floats (first vectors))
+                   _       (when-let [expected (openai-compatible-configured-dimensions spec)]
+                             (when-not (= (long expected) (long dims))
+                               (raise "Embedding dimensions do not match the configured OpenAI-compatible provider dimensions"
+                                      {:expected-dimensions expected
+                                       :provider-dimensions dims
+                                       :provider-spec spec})))
+                   metadata (openai-compatible-base-metadata spec dims)]
+               (reset! dimensions* dims)
+               (reset! metadata* metadata)
+               {:dimensions dims
+                :metadata   metadata}))))))
 
 (defn- validate-openai-compatible-vectors
   [spec dimensions* metadata* items vectors]
@@ -706,24 +709,27 @@
         (reset! metadata* (openai-compatible-base-metadata spec dims)))))
   vectors)
 
-(deftype OpenAICompatibleProvider [provider-spec metadata* dimensions* closed?]
+(deftype OpenAICompatibleProvider [provider-spec metadata* dimensions* closed?
+                                   ^HttpClient http-client]
   IEmbeddingProvider
   (embedding [_ items _opts]
     (ensure-provider-open closed? provider-spec)
-    (->> items
-         (perform-openai-compatible-request provider-spec)
-         openai-compatible-response-vectors
-         (validate-openai-compatible-vectors provider-spec dimensions*
-                                            metadata* items)))
+    (let [vectors (openai-compatible-response-vectors
+                    (perform-openai-compatible-request provider-spec items
+                                                       http-client))]
+      (validate-openai-compatible-vectors provider-spec dimensions*
+                                          metadata* items vectors)))
   (embedding-metadata [_]
     (ensure-provider-open closed? provider-spec)
     (or @metadata*
-        (:metadata (openai-compatible-space provider-spec metadata* dimensions*))))
+        (:metadata (openai-compatible-space provider-spec metadata* dimensions*
+                                            http-client))))
   (embedding-dimensions [_]
     (ensure-provider-open closed? provider-spec)
     (or @dimensions*
         (:dimensions (openai-compatible-space provider-spec metadata*
-                                             dimensions*))))
+                                             dimensions*
+                                             http-client))))
   (close-provider [_]
     (reset! closed? true))
 
@@ -754,22 +760,26 @@
                (:timeout-ms spec)))
 
 (defn- send-json-request
-  [{:keys [url headers body timeout-ms]}]
-  (let [^HttpClient client (create-http-client)
-        builder           (-> (HttpRequest/newBuilder (URI/create url))
-                              (.header "User-Agent" "Datalevin"))
-        builder           (reduce-kv
-                            (fn [^HttpRequest$Builder b k v]
-                              (.header b ^String k ^String v))
-                            builder
-                            headers)
-        builder           (cond-> builder
-                            timeout-ms
-                            (.timeout (Duration/ofMillis (long timeout-ms))))
-        ^HttpRequest req  (-> builder
-                              (.POST (HttpRequest$BodyPublishers/ofString
-                                       (json/write-value-as-string body)))
-                              (.build))
+  [{:keys [url headers body timeout-ms client]}]
+  (let [^HttpClient client          (or client (create-http-client))
+        ^HttpRequest$Builder builder
+        (-> (HttpRequest/newBuilder (URI/create url))
+            (.header "User-Agent" "Datalevin"))
+        ^HttpRequest$Builder builder
+        (reduce-kv
+          (fn [^HttpRequest$Builder b k v]
+            (.header b ^String k ^String v))
+          builder
+          headers)
+        ^HttpRequest$Builder builder
+        (if timeout-ms
+          (.timeout builder (Duration/ofMillis (long timeout-ms)))
+          builder)
+        ^HttpRequest$Builder builder
+        (.POST builder
+               (HttpRequest$BodyPublishers/ofString
+                 (json/write-value-as-string body)))
+        ^HttpRequest req           (.build builder)
         ^HttpResponse resp (.send client req
                                   (HttpResponse$BodyHandlers/ofString))]
     {:status (.statusCode resp)
@@ -779,12 +789,16 @@
   send-json-request)
 
 (defn- perform-openai-compatible-request
-  [spec items]
-  (let [resp (*openai-compatible-request!*
-               {:url        (openai-compatible-endpoint spec)
-                :headers    (openai-compatible-headers spec)
-                :body       (openai-compatible-request-body spec items)
-                :timeout-ms (http-request-timeout spec)})
+  ([spec items]
+   (perform-openai-compatible-request spec items nil))
+  ([spec items http-client]
+   (let [resp (*openai-compatible-request!*
+                (cond-> {:url        (openai-compatible-endpoint spec)
+                         :headers    (openai-compatible-headers spec)
+                         :body       (openai-compatible-request-body spec items)
+                         :timeout-ms (http-request-timeout spec)}
+                  http-client
+                  (assoc :client http-client)))
         status (:status resp)
         body   (parse-openai-json-response (:body resp))]
     (when-not (= 200 status)
@@ -792,7 +806,7 @@
              {:status status
               :error  (openai-compatible-response-error body)
               :body   body}))
-    body))
+    body)))
 
 (defn- move-file!
   [^Path source ^Path target]
@@ -887,7 +901,8 @@
       spec
       (atom metadata)
       (atom dimensions)
-      (atom false))))
+      (atom false)
+      (create-http-client))))
 
 (def ^:dynamic *openai-compatible-provider-factory*
   create-openai-compatible-provider)

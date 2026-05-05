@@ -673,7 +673,7 @@
     (entries lmdb (if (string? index) index (index->dbi index))))
 
   (load-datoms [this datoms]
-    (load-datoms-with-plan! this datoms nil))
+    (load-datoms-with-plan! this datoms (prepare-embedding-plan this datoms)))
 
   (fetch [_ datom]
     (mapv #(retrieved->datom lmdb attrs %)
@@ -1883,7 +1883,9 @@
 (defn- store-visible-opts
   [opts]
   (-> (persistable-ha-opts opts)
-      (dissoc raw-persist-open-opts-key)))
+      (dissoc :embedding-providers
+              :embedding-domain-providers
+              raw-persist-open-opts-key)))
 
 (defn- persistable-opts
   [opts]
@@ -2488,9 +2490,6 @@
                                                          (or (:embedding-opts opts3)
                                                              embedding-opts))
                                   :embedding-domains e-domains))
-             e-providers (init-embedding-providers dir e-domains
-                                                   embedding-providers)
-             opts4       (assoc opts4 :embedding-domain-providers e-providers)
              store-opts  (store-visible-opts opts4)
              dir-key     (shared-local-store-key dir)]
          (if raw-persist-open-opts?
@@ -2509,7 +2508,9 @@
                                                [dir-key :refs]
                                                0)))})))
              wrapper)
-           (let [store (->Store lmdb
+           (let [e-providers (init-embedding-providers dir e-domains
+                                                       embedding-providers)
+                 store (->Store lmdb
                                 (init-engines lmdb s-domains)
                                 (init-indices lmdb v-domains)
                                 (init-embedding-indices lmdb e-domains)
