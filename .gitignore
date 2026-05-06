@@ -60,7 +60,10 @@ reading
 .nrepl-port
 .cpcache/
 /codox
-.clj-kondo/
+.clj-kondo/*
+!.clj-kondo/config.edn
+!.clj-kondo/hooks/
+!.clj-kondo/hooks/**
 !/resources/.clj-kondo/
 !/resources/.clj-kondo/**
 *.o

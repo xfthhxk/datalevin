@@ -541,51 +541,17 @@
 
 (def flip-ranges qo/flip-ranges)
 
-(def ^:private optimizer-deps
-  {:resolve-pattern-lookup-refs resolve-pattern-lookup-refs
-   :make-call make-call
-   :resolve-pred resolve-pred
-   :or-join-execute-link or-join-execute-link
-   :execute-steps execute-steps
-   :resolve-clause resolve-clause
-   :step-sample -sample
-   :step-execute -execute
-   :step-type -type
-   :plan-cache qexec/*plan-cache*
-   :map->Clause map->Clause
-   :map->Node map->Node
-   :link (fn [type tgt var attrs attr] (Link. type tgt var attrs attr))
-   :or-join-link (fn [type tgt clause bound-var free-vars tgt-attr source]
-                   (OrJoinLink. type tgt clause bound-var free-vars tgt-attr source))
-   :map->InitStep map->InitStep
-   :merge-scan-step
-   (fn [index attrs-v vars in out cols strata seen-or-joins result sample]
-     (MergeScanStep. index attrs-v vars in out cols strata seen-or-joins result sample))
-   :link-step
-   (fn [type index attr var fidx in out cols strata seen-or-joins]
-     (LinkStep. type index attr var fidx in out cols strata seen-or-joins))
-   :hash-join-step
-   (fn [link link-e in out in-cols cols strata seen-or-joins tgt-steps in-size tgt-size]
-     (HashJoinStep. link link-e in out in-cols cols strata seen-or-joins tgt-steps in-size tgt-size))
-   :or-join-step
-   (fn [clause bound-var bound-idx free-vars tgt tgt-attr sources rules in out cols strata seen-or-joins]
-     (OrJoinStep. clause bound-var bound-idx free-vars tgt tgt-attr sources rules in out cols strata seen-or-joins))
-   :not-join-step
-   (fn [clause vars sources rules in out cols strata seen-or-joins]
-     (NotJoinStep. clause vars sources rules in out cols strata seen-or-joins))
-   :plan (fn [steps cost size recency] (Plan. steps cost size recency))})
-
 (defn- build-graph
   [context]
-  (qo/build-graph optimizer-deps context))
+  (qo/build-graph context))
 
 (defn- build-plan
   [context]
-  (qo/build-plan optimizer-deps context))
+  (qo/build-plan context))
 
 (defn- plan-not-joins
   [context]
-  (qo/plan-not-joins optimizer-deps context))
+  (qo/plan-not-joins context))
 
 (defn- build-explain
   []

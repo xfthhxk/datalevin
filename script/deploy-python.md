@@ -5,9 +5,9 @@ This document covers the manual release flow for the `datalevin` Python wheel.
 ## Scope
 
 This script builds and uploads the current-host wheel. It is useful for manual
-releases, especially the FreeBSD wheel, and for local dry runs. The normal
-multi-platform Linux/macOS/Windows release still lives in the GitHub Actions
-workflows under `.github/workflows/release.python*.yml`.
+releases and local dry runs. The normal multi-platform Linux/macOS/Windows
+release still lives in the GitHub Actions workflows under
+`.github/workflows/release.python*.yml`.
 
 ## Prerequisites
 

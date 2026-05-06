@@ -207,11 +207,11 @@ GitHub Actions release workflows are split the same way:
   TestPyPI.
 - `.github/workflows/release.python.yml` publishes tagged releases to PyPI.
 
-For a local manual release helper, including the FreeBSD wheel path, see
+For a local manual release helper, see
 [`script/deploy-python.md`](../../script/deploy-python.md).
 
-The hosted release workflows currently cover Linux, macOS arm64, and Windows.
-FreeBSD amd64 wheels are a manual release path.
+The hosted release workflows currently cover Linux amd64, Linux arm64, macOS
+arm64, and Windows amd64.
 
 For ad hoc development against a different build, set `DATALEVIN_JAR` to point
 at another embeddable Datalevin runtime jar, preferably

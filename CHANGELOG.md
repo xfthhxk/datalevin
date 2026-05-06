@@ -981,7 +981,7 @@ large transactions.
 
 ## 0.7.4 (2022-12-15)
 ### Fixed
-- typo prevent build on CI
+- typo that prevented build on CI
 
 ## 0.7.3 (2022-12-15)
 ### Fixed
