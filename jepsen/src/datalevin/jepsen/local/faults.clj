@@ -55,6 +55,8 @@
   :ha/follower-snapshot-unavailable)
 (def ^:private snapshot-checksum-mismatch-message
   "Copy checksum mismatch")
+(def ^:private remote-snapshot-failpoints-triggered
+  (atom #{}))
 
 (def ^:private disruption-write-failure-markers
   ["HA write admission rejected"
@@ -150,6 +152,12 @@
           :snapshot-failpoint-file
           safe-read-edn-file
           :mode))
+
+(defn- first-remote-snapshot-failpoint?
+  [{:keys [ha-db-identity ha-node-id]} mode]
+  (let [k       [ha-db-identity ha-node-id mode]
+        [old _] (swap-vals! remote-snapshot-failpoints-triggered conj k)]
+    (not (contains? old k))))
 
 (defn- logical-node-for-ha-state
   [{:keys [cluster-entry-for-db-identity remote-runtime-node]}
@@ -315,40 +323,35 @@
     (maybe-apply-link-fault! fault endpoint)
     (case fail-mode
       :snapshot-unavailable
-      (throw (ex-info "forced snapshot source failure"
-                      {:error snapshot-unavailable-error-code
-                       :endpoint endpoint}))
+      (if (first-remote-snapshot-failpoint? m fail-mode)
+        (throw (ex-info "forced snapshot source failure"
+                        {:error snapshot-unavailable-error-code
+                         :endpoint endpoint}))
+        (fetch! db-name m endpoint dest-dir))
 
       :db-identity-mismatch
-      (let [{:keys [copy-meta] :as result}
-            (fetch! db-name m endpoint dest-dir)]
-        (assoc result
-               :copy-meta
-               (assoc (or copy-meta {})
-                      :db-name db-name
-                      :db-identity "db-mismatch")))
+      (if (first-remote-snapshot-failpoint? m fail-mode)
+        {:copy-meta {:db-name db-name
+                     :db-identity "db-mismatch"}}
+        (fetch! db-name m endpoint dest-dir))
 
       :manifest-corruption
-      (let [{:keys [copy-meta] :as result}
-            (fetch! db-name m endpoint dest-dir)]
-        (assoc result
-               :copy-meta
-               (-> (or copy-meta {})
-                   (assoc :db-name db-name
-                          :db-identity (:ha-db-identity m))
-                   (dissoc :snapshot-last-applied-lsn
-                           :payload-last-applied-lsn))))
+      (if (first-remote-snapshot-failpoint? m fail-mode)
+        {:copy-meta {:db-name db-name
+                     :db-identity (:ha-db-identity m)}}
+        (fetch! db-name m endpoint dest-dir))
 
       :checksum-mismatch
-      (do
-        (fetch! db-name m endpoint dest-dir)
+      (if (first-remote-snapshot-failpoint? m fail-mode)
         (throw (ex-info snapshot-checksum-mismatch-message
                         {:expected-checksum "forced-invalid-checksum"
-                         :actual-checksum "forced-copy-checksum"})))
+                         :actual-checksum "forced-copy-checksum"}))
+        (fetch! db-name m endpoint dest-dir))
 
       :copy-corruption
       (let [result (fetch! db-name m endpoint dest-dir)]
-        (spit (str dest-dir u/+separator+ "data.mdb") "not-an-lmdb-file")
+        (when (first-remote-snapshot-failpoint? m fail-mode)
+          (spit (str dest-dir u/+separator+ "data.mdb") "not-an-lmdb-file"))
         result)
 
       (fetch! db-name m endpoint dest-dir))))

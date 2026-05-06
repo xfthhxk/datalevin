@@ -39,6 +39,7 @@
 (def ^:private retryable-leader-failure-markers
   ["HA write admission rejected"
    "Timed out waiting for single leader"
+   "Timed out waiting for durable LSN"
    "Timeout in making request"
    "Unable to connect to server:"
    "Connection refused"])
@@ -162,6 +163,7 @@
         message  (ex-message e)]
     (or (local/transport-failure? e)
         (true? (:retryable? err-data))
+        (= :txlog/commit-timeout (:type err-data))
         (= :ha/write-rejected (:error err-data))
         (and (string? message)
              (some #(str/includes? message %)
@@ -239,57 +241,57 @@
   (= (vec (sort source-nodes))
      (realized-wal-gap-sources follower-next-lsn gc-results)))
 
+(defn- first-failure?
+  [triggered?]
+  (compare-and-set! triggered? false true))
+
 (defn- snapshot-copy-failure-redefs
   [failure-mode orig-fetch orig-copy]
-  (case failure-mode
-    :snapshot-unavailable
-    {#'dha/fetch-ha-endpoint-snapshot-copy!
-     (fn [_ _ endpoint _]
-       (throw (ex-info "forced snapshot source failure"
-                       {:error snapshot-unavailable-error-code
-                        :endpoint endpoint})))}
+  (let [triggered? (atom false)]
+    (case failure-mode
+      :snapshot-unavailable
+      {#'dha/fetch-ha-endpoint-snapshot-copy!
+       (fn [db-name m endpoint dest-dir]
+         (if (first-failure? triggered?)
+           (throw (ex-info "forced snapshot source failure"
+                           {:error snapshot-unavailable-error-code
+                            :endpoint endpoint}))
+           (orig-fetch db-name m endpoint dest-dir)))}
 
-    :db-identity-mismatch
-    {#'dha/fetch-ha-endpoint-snapshot-copy!
-     (fn [db-name m endpoint dest-dir]
-       (let [{:keys [copy-meta] :as result}
-             (orig-fetch db-name m endpoint dest-dir)]
-         (assoc result
-                :copy-meta
-                (assoc (or copy-meta {})
-                       :db-name db-name
-                       :db-identity "db-mismatch"))))}
+      :db-identity-mismatch
+      {#'dha/fetch-ha-endpoint-snapshot-copy!
+       (fn [db-name m endpoint dest-dir]
+         (if (first-failure? triggered?)
+           {:copy-meta {:db-name db-name
+                        :db-identity "db-mismatch"}}
+           (orig-fetch db-name m endpoint dest-dir)))}
 
-    :manifest-corruption
-    {#'dha/fetch-ha-endpoint-snapshot-copy!
-     (fn [db-name m endpoint dest-dir]
-       (let [{:keys [copy-meta] :as result}
-             (orig-fetch db-name m endpoint dest-dir)]
-         (assoc result
-                :copy-meta
-                (-> (or copy-meta {})
-                    (assoc :db-name db-name
-                           :db-identity (:ha-db-identity m))
-                    (dissoc :snapshot-last-applied-lsn
-                            :payload-last-applied-lsn)))))}
+      :manifest-corruption
+      {#'dha/fetch-ha-endpoint-snapshot-copy!
+       (fn [db-name m endpoint dest-dir]
+         (if (first-failure? triggered?)
+           {:copy-meta {:db-name db-name
+                        :db-identity (:ha-db-identity m)}}
+           (orig-fetch db-name m endpoint dest-dir)))}
 
-    :checksum-mismatch
-    {#'dha/copy-ha-remote-store!
-     (fn [remote-store dest-dir compact?]
-       (let [copy-meta (orig-copy remote-store dest-dir compact?)]
-         (throw (ex-info snapshot-checksum-mismatch-message
-                         {:expected-checksum "forced-invalid-checksum"
-                          :actual-checksum "forced-copy-checksum"}))
-         copy-meta))}
+      :checksum-mismatch
+      {#'dha/copy-ha-remote-store!
+       (fn [remote-store dest-dir compact?]
+         (if (first-failure? triggered?)
+           (throw (ex-info snapshot-checksum-mismatch-message
+                           {:expected-checksum "forced-invalid-checksum"
+                            :actual-checksum "forced-copy-checksum"}))
+           (orig-copy remote-store dest-dir compact?)))}
 
-    :copy-corruption
-    {#'dha/fetch-ha-endpoint-snapshot-copy!
-     (fn [db-name m endpoint dest-dir]
-       (let [result (orig-fetch db-name m endpoint dest-dir)]
-         (spit (str dest-dir "/data.mdb") "not-an-lmdb-file")
-         result))}
+      :copy-corruption
+      {#'dha/fetch-ha-endpoint-snapshot-copy!
+       (fn [db-name m endpoint dest-dir]
+         (let [result (orig-fetch db-name m endpoint dest-dir)]
+           (when (first-failure? triggered?)
+             (spit (str dest-dir "/data.mdb") "not-an-lmdb-file"))
+           result))}
 
-    {}))
+      {})))
 
 (defn- wait-for-real-wal-gap!
   [test key-count source-nodes follower-next-lsn start-value]
