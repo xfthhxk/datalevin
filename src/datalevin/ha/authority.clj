@@ -249,4 +249,3 @@
                      {:db-name db-name
                       :ha-role (:ha-role m)})
            failed-m))))))
-

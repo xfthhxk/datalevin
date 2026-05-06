@@ -196,13 +196,10 @@ python -m pip wheel --no-build-isolation bindings/python -w dist/
 ```
 
 Set `DATALEVIN_NATIVE_PLATFORM` to override the inferred target when building a
-wheel from a different platform tag. Supported values are
-`linux-x86_64`, `linux-arm64`, `macosx-arm64`, `windows-x86_64`,
-`freebsd-x86_64`, and `all`.
+wheel from a different platform tag. Supported values are `linux-x86_64`,
+`linux-arm64`, `macosx-arm64`, and `windows-x86_64`.
 
-FreeBSD amd64 wheel builds should run on a FreeBSD host so the wheel keeps the
-native `freebsd_*_amd64` platform tag. Those builds vendor the shared runtime
-jar (`:native-platform all`) and rely on the FreeBSD-provided native libraries.
+FreeBSD users should use the platform's own package instead of the PyPI wheel.
 
 GitHub Actions release workflows are split the same way:
 

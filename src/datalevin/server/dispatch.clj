@@ -210,7 +210,12 @@
   ;; `:close-database` removes the live store and takes the runtime-store write
   ;; lock during `remove-store`. Wrapping it in the generic read-access guard
   ;; would deadlock on a same-thread read->write lock upgrade.
-  #{:close-database})
+  ;;
+  ;; `:copy` takes a narrower source-store read lock in its handler while it
+  ;; performs the LMDB snapshot copy. The generic guard would also cover the
+  ;; response file transfer, delaying shutdown longer than necessary.
+  #{:close-database
+    :copy})
 
 (defn- runtime-read-access-message?
   [{:keys [type writing?]}]

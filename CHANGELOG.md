@@ -5,7 +5,7 @@
 ### Changed
 - [Datalog] The default write mode for embedded store is returned to `:wal?
   false`, as it is safe and fast. `:wal? true` is opt in. However, once opted
-  in, the default is `:wal-durability-profile :relaxted`, so as to meet user's
+  in, the default is `:wal-durability-profile :relaxed`, so as to meet user's
   expectation of enhanced throughput. Server mode continues to default to `:wal?
   true` and `:wal-durability-profile :strict`.
 
@@ -20,7 +20,7 @@
 - [API] JSON API. [#182](https://github.com/datalevin/datalevin/issues/182)
 - [Lib] Release a trimmed down embedded use only jar
   `org.datalevin/datalevin-embedded:<version>` to Clojars. This jar does not
-  contains code for server/HA/pod and related dependencies.
+  contain code for server/HA/pod and related dependencies.
 - [Lib] Release Datalevin as a Java library
   `org.datalevin:datalevin-java:<version>` to maven central, for embedded use.
 - [Lib] Release Datalevin as a Python library `datalevin`to PyPI, for embedded
@@ -39,7 +39,7 @@
   A default embedding model `multilingual-e5-small-Q8_0.gguf` is downloaded from
   HuggingFace on first use. This small 384 dimensions model is sufficient for
   short text snippets embedding. For large and complex text passages, user
-  should download a larger model in GGUF format, or use an OpeanAI compatible
+  should download a larger model in GGUF format, or use an OpenAI compatible
   external LLM provider instead.
 - [Datalog] For embedding enabled datoms, `embedding-neighbors` built-in function to
   return `[e, a, v]` based on vector similarity. Details in [doc](doc/vector.md).

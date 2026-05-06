@@ -29,8 +29,8 @@ If you need to override the wheel target tag, set:
 export DATALEVIN_NATIVE_PLATFORM=linux-x86_64
 ```
 
-Supported values are `linux-x86_64`, `linux-arm64`, `macosx-arm64`,
-`windows-x86_64`, `freebsd-x86_64`, and `all`.
+Supported values are `linux-x86_64`, `linux-arm64`, `macosx-arm64`, and
+`windows-x86_64`.
 
 ## Dry Run
 

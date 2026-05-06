@@ -147,6 +147,19 @@
        :reason :write-transaction-open
        :db-name db-name})))
 
+(defn- with-copy-db-transaction-slot
+  [deps server db-name f]
+  (let [^Semaphore lock (db-lock deps server db-name)]
+    (if (.tryAcquire lock)
+      (try
+        (f)
+        (finally
+          (.release lock)))
+      (u/raise
+       "Cannot copy database while a write transaction is active; retry later"
+       {:error :db/copy-write-transaction-active
+        :db-name db-name}))))
+
 (defn- with-direct-db-transaction-slot
   [deps server db-name writing? f]
   (if writing?
@@ -1242,21 +1255,26 @@
            db-name
            (fn []
              ;; Snapshot copy must not race a runtime store swap/reopen.
-             (with-transient-runtime-store-retry
+             (with-copy-db-transaction-slot
+               deps
+               server
+               db-name
                (fn []
-                 (let [source-store (kv-store deps server skey db-name writing?)]
-                   (vreset! source-store-v source-store)
-                   (try
-                     (copy-store! source-store true)
-                     (catch Throwable e
-                       (when (transient-runtime-store-error? e)
-                         (cleanup-copy-dir!)
-                         (log/debug
-                           e
-                           "Retrying server copy without WAL backup pin after transient source-store race"
-                           {:db-name db-name})
-                         (copy-store! source-store false))
-                       (throw e))))))))
+                 (with-transient-runtime-store-retry
+                   (fn []
+                     (let [source-store (kv-store deps server skey db-name writing?)]
+                       (vreset! source-store-v source-store)
+                       (try
+                         (copy-store! source-store true)
+                         (catch Throwable e
+                           (when (transient-runtime-store-error? e)
+                             (cleanup-copy-dir!)
+                             (log/debug
+                              e
+                              "Retrying server copy without WAL backup pin after transient source-store race"
+                              {:db-name db-name})
+                             (copy-store! source-store false))
+                           (throw e))))))))))
          (let [completed-ms (System/currentTimeMillis)
                copied-store ((:open-server-copied-store! deps) tf nil nil)]
            (try

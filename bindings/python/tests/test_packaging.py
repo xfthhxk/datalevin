@@ -33,36 +33,29 @@ def test_wheel_platform_tag_tracks_target_platform() -> None:
     assert module._wheel_platform_tag("windows-x86_64", "linux_x86_64") == "win_amd64"
 
 
-def test_build_native_platform_normalizes_freebsd_amd64() -> None:
+def test_build_native_platform_rejects_freebsd_amd64() -> None:
     module = _load_setup_module()
-    assert module._build_native_platform("freebsd_14_2_amd64") == "freebsd-x86_64"
+    with pytest.raises(module.DistutilsSetupError, match="Unsupported wheel platform"):
+        module._build_native_platform("freebsd_14_2_amd64")
 
 
-def test_wheel_platform_tag_uses_native_freebsd_tag() -> None:
+def test_build_native_platform_rejects_shared_all_runtime() -> None:
     module = _load_setup_module()
-    assert (
-        module._wheel_platform_tag("freebsd-x86_64", "freebsd_14_2_amd64")
-        == "freebsd_14_2_amd64"
-    )
+    with pytest.raises(module.DistutilsSetupError, match="Unsupported wheel platform"):
+        module._build_native_platform("all")
 
 
-def test_wheel_platform_tag_rejects_cross_built_freebsd_without_plat_name() -> None:
-    module = _load_setup_module()
-    with pytest.raises(module.DistutilsSetupError, match="FreeBSD wheel tagging requires"):
-        module._wheel_platform_tag("freebsd-x86_64", "linux_x86_64")
-
-
-def test_vendor_runtime_jar_uses_shared_runtime_for_freebsd() -> None:
+def test_vendor_runtime_jar_uses_selected_platform() -> None:
     module = _load_setup_module()
     with patch("subprocess.run") as run:
-        module._vendor_runtime_jar("freebsd-x86_64")
+        module._vendor_runtime_jar("linux-arm64")
     run.assert_called_once_with(
         [
             "clojure",
             "-T:build",
             "vendor-jar",
             ":native-platform",
-            "all",
+            "linux-arm64",
         ],
         cwd=module.REPO_ROOT,
         check=True,
