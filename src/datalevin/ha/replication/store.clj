@@ -88,22 +88,44 @@
                  (when (instance? DB stale-dt-db)
                    (.-store ^DB stale-dt-db))]))))))
 
+(defn- store->kv-store
+  [store]
+  (cond
+    (nil? store) nil
+    (instance? Store store) (.-lmdb ^Store store)
+    (instance? ILMDB store) store
+    :else nil))
+
 (defn local-kv-store
   [m]
   (some
    (fn [store]
-     (let [kv-store (cond
-                      (nil? store) nil
-                      (instance? Store store) (.-lmdb ^Store store)
-                      (instance? ILMDB store) store
-                      :else nil)]
+     (let [kv-store (store->kv-store store)]
        (when-not (closed-kv-store? kv-store)
          kv-store)))
    (kv-store-candidates m)))
 
+(defn explicit-local-kv-store
+  [m]
+  (some
+   (fn [store]
+     (let [kv-store (store->kv-store store)]
+       (when-not (closed-kv-store? kv-store)
+         kv-store)))
+   [(:store m)
+    (when (instance? DB (:dt-db m))
+      (.-store ^DB (:dt-db m)))]))
+
 (defn raw-local-kv-store
   [m]
   (when-let [kv-store (local-kv-store m)]
+    (if (instance? datalevin.kv.KVLMDB kv-store)
+      (.-db ^datalevin.kv.KVLMDB kv-store)
+      kv-store)))
+
+(defn explicit-raw-local-kv-store
+  [m]
+  (when-let [kv-store (explicit-local-kv-store m)]
     (if (instance? datalevin.kv.KVLMDB kv-store)
       (.-db ^datalevin.kv.KVLMDB kv-store)
       kv-store)))

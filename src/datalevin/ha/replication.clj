@@ -98,6 +98,10 @@
   (with-store-runtime-bindings
     #(store/raw-local-kv-store m)))
 
+(defn- explicit-raw-local-kv-store
+  [m]
+  (store/explicit-raw-local-kv-store m))
+
 (defn- ^:redef persist-ha-local-applied-lsn!
   [m applied-lsn]
   (with-store-runtime-bindings
@@ -2067,6 +2071,8 @@
        validate-ha-snapshot-copy!
        :install-ha-local-snapshot!
        install-ha-local-snapshot!
+       :explicit-raw-local-kv-store
+       explicit-raw-local-kv-store
        :raw-local-kv-store
        raw-local-kv-store
        :read-ha-local-snapshot-current-lsn

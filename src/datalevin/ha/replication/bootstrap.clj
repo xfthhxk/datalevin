@@ -171,7 +171,8 @@
    (reconcile-ha-installed-snapshot-state m snapshot-lsn nil))
   ([m snapshot-lsn trusted-max-lsn]
    (let [{:keys [verified-floor-lsn] :as replay}
-         (inspect-ha-local-bootstrap-tail m snapshot-lsn trusted-max-lsn)
+         (binding [store/*ha-current-state-fn* (fn [] nil)]
+           (inspect-ha-local-bootstrap-tail m snapshot-lsn trusted-max-lsn))
          reopen-info (store/ha-local-store-reopen-info m)
          clamped? (< (long verified-floor-lsn)
                      (long (:candidate-floor-lsn replay)))
@@ -351,13 +352,14 @@
            fetch-ha-endpoint-snapshot-copy!
            validate-ha-snapshot-copy!
            install-ha-local-snapshot!
+           explicit-raw-local-kv-store
            raw-local-kv-store
            read-ha-local-snapshot-current-lsn
            reconcile-ha-installed-snapshot-state
            persist-ha-local-applied-lsn!
            note-ha-bootstrap-installed-state
            sync-ha-follower-batch]}
-   db-name m lease source-order next-lsn now-ms]
+  db-name m lease source-order next-lsn now-ms]
   (let [required-lsn (long (max 0 (dec (long next-lsn))))]
     (loop [remaining source-order
            current-m (normalize-ha-bootstrap-retry-state
@@ -384,10 +386,12 @@
                       (install-ha-local-snapshot! current-m snapshot-dir)]
                   (if (:ok? install-res)
                     (let [installed-state (:state install-res)
+                          installed-raw-local-kv-store
+                          (or explicit-raw-local-kv-store raw-local-kv-store)
                           local-snapshot-lsn
                           (long (max 0
                                      (long (if-let [kv-store
-                                                    (raw-local-kv-store
+                                                    (installed-raw-local-kv-store
                                                      installed-state)]
                                              (read-ha-local-snapshot-current-lsn
                                               kv-store)

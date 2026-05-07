@@ -5,6 +5,7 @@
    [datalevin.core :as d]
    [datalevin.ha.replication :as drep]
    [datalevin.ha.replication.bootstrap :as boot]
+   [datalevin.ha.replication.store :as store]
    [datalevin.interface :as i]
    [datalevin.kv :as kv]
    [datalevin.util :as u])
@@ -15,6 +16,18 @@
   (is (= 15 (#'drep/next-ha-follower-sync-lsn 15 23)))
   (is (= 10 (#'drep/next-ha-follower-sync-lsn 15 10)))
   (is (= 15 (#'drep/next-ha-follower-sync-lsn 15 nil))))
+
+(deftest explicit-local-kv-store-bypasses-dynamic-current-state-test
+  (let [old-store (reify i/ILMDB
+                    (closed-kv? [_] false))
+        installed-store (reify i/ILMDB
+                          (closed-kv? [_] false))]
+    (binding [store/*ha-current-state-fn* (fn [] {:store old-store})]
+      (is (identical? old-store
+                      (store/raw-local-kv-store {:store installed-store})))
+      (is (identical? installed-store
+                      (store/explicit-raw-local-kv-store
+                       {:store installed-store}))))))
 
 (deftest gap-bootstrap-next-lsn-uses-first-retained-source-lsn-test
   (is (= 24 (#'drep/ha-gap-bootstrap-next-lsn
