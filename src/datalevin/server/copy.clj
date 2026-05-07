@@ -11,7 +11,6 @@
   "Copy helpers for large client/server data transfer."
   (:require
    [datalevin.constants :as c]
-   [datalevin.ha.replication :as drep]
    [datalevin.interface :as i]
    [datalevin.kv :as kv]
    [datalevin.protocol :as p]
@@ -186,7 +185,10 @@
         payload-lsn
         (when kv-store
           (try
-            (long (drep/read-ha-snapshot-payload-lsn {:store store}))
+            (long (or (i/get-value kv-store c/kv-info
+                                   c/wal-local-payload-lsn
+                                   :keyword :data)
+                      0))
             (catch Exception _
               0)))
         db-identity (or (:db-identity store-opts)

@@ -84,8 +84,9 @@ engine](doc/search.md) that has [competitive](benchmarks/search-bench) search
 performance.
 
 Datalevin is also AI-native. It ships with a built-in local [MCP
-server](doc/mcp.md). Datalevin supports in-DB embedding, OCR and text generation
-with built-in [llama.cpp](https://github.com/ggml-org/llama.cpp), so
+server](doc/mcp.md). Datalevin supports in-DB embedding and text generation with
+built-in [llama.cpp](https://github.com/ggml-org/llama.cpp), and compatible
+OCR-capable generation models can be used for OCR workflows, so
 AI clients can query Datalevin over MCP while RAG applications keep embedding
 generation and search in the same database runtime.
 

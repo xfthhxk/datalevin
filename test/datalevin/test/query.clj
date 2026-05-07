@@ -35,6 +35,22 @@
     (d/close-db db)
     (u/delete-files dir)))
 
+(deftest test-query-false-value
+  (let [dir (u/tmp-dir (str "test-query-false-" (UUID/randomUUID)))
+        db  (-> (d/empty-db dir {:flag {:db/valueType :db.type/boolean}})
+                (d/db-with [{:db/id 1 :flag false}
+                            {:db/id 2 :flag true}]))]
+    (is (= #{[1]}
+           (d/q '[:find ?e
+                  :where [?e :flag false]]
+                db)))
+    (is (= #{[1 false] [2 true]}
+           (d/q '[:find ?e ?flag
+                  :where [?e :flag ?flag]]
+                db)))
+    (d/close-db db)
+    (u/delete-files dir)))
+
 (deftest test-many-joins
   (let [data (->> (range 1000)
                   (map (fn [^long i]

@@ -143,6 +143,27 @@
     (is (= 0 (:failure-count result)))
     (is (= 1 (:disruption-failure-count result)))))
 
+(deftest identity-upsert-checker-ignores-closed-client-during-failover-test
+  (let [op     {:f :string-tempid-upsert-ref
+                :identity/case-id 8}
+        result (checker/check
+                (#'identity-upsert/identity-upsert-checker)
+                {:datalevin/nemesis-faults [:clock-skew :leader-failover]}
+                (history/history
+                 [(assoc op
+                         :process 0
+                         :type :ok
+                         :value (#'identity-upsert/expected-states op))
+                  (assoc op
+                         :process 1
+                         :type :fail
+                         :error "This client is closed")])
+                nil)]
+    (is (true? (:valid? result)) (pr-str result))
+    (is (= 0 (:mismatch-count result)))
+    (is (= 0 (:failure-count result)))
+    (is (= 1 (:disruption-failure-count result)))))
+
 (deftest identity-upsert-checker-allows-transient-read-back-mismatch-test
   (let [op      {:f :string-tempid-upsert-ref
                  :identity/case-id 8}
