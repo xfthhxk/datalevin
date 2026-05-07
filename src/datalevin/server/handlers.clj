@@ -1236,27 +1236,34 @@
                            backup-pin-enabled?]
                    ((:server-copy-store! deps) source-store tf compact?)))]
        (try
-         (with-runtime-store-read-access
+         (with-direct-db-transaction-slot
            deps
            server
            db-name
+           writing?
            (fn []
-             ;; Snapshot copy must not race a runtime store swap/reopen.
-             (with-transient-runtime-store-retry
+             (with-runtime-store-read-access
+               deps
+               server
+               db-name
                (fn []
-                 (let [source-store (kv-store deps server skey db-name writing?)]
-                   (vreset! source-store-v source-store)
-                   (try
-                     (copy-store! source-store true)
-                     (catch Throwable e
-                       (when (transient-runtime-store-error? e)
-                         (cleanup-copy-dir!)
-                         (log/debug
-                           e
-                           "Retrying server copy without WAL backup pin after transient source-store race"
-                           {:db-name db-name})
-                         (copy-store! source-store false))
-                       (throw e))))))))
+                 ;; Snapshot copy must not race a runtime store swap/reopen.
+                 (with-transient-runtime-store-retry
+                   (fn []
+                     (let [source-store (kv-store deps server skey db-name
+                                                  writing?)]
+                       (vreset! source-store-v source-store)
+                       (try
+                         (copy-store! source-store true)
+                         (catch Throwable e
+                           (when (transient-runtime-store-error? e)
+                             (cleanup-copy-dir!)
+                             (log/debug
+                               e
+                               "Retrying server copy without WAL backup pin after transient source-store race"
+                               {:db-name db-name})
+                             (copy-store! source-store false))
+                           (throw e))))))))))
          (let [completed-ms (System/currentTimeMillis)
                copied-store ((:open-server-copied-store! deps) tf nil nil)]
            (try
