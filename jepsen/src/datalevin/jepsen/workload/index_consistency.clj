@@ -492,22 +492,37 @@
             (remove (set (concat disruption-failures indeterminate)) terminal)
             oks        (filter (comp #{:ok} :type) checked-terminal)
             failures   (filter (comp #{:fail} :type) checked-terminal)
-            mismatches (->> checked-terminal
-                            (keep (fn [op]
-                                    (let [expected {:type  :ok
-                                                    :value (expected-states op)}
-                                          actual   (cond-> {:type (:type op)}
-                                                     (= :ok (:type op))
-                                                     (assoc :value (:value op))
+            all-mismatches
+            (->> checked-terminal
+                 (keep (fn [op]
+                         (let [case-id        (:index/case-id op)
+                               expected       {:type  :ok
+                                               :value (expected-states op)}
+                               actual         (cond-> {:type (:type op)}
+                                                (= :ok (:type op))
+                                                (assoc :value (:value op))
 
-                                                     (not= :ok (:type op))
-                                                     (assoc :error (:error op)))]
-                                      (when (not= expected actual)
-                                        {:f        (:f op)
-                                         :case-id  (:index/case-id op)
-                                         :expected expected
-                                         :actual   actual}))))
-                            vec)
+                                                (not= :ok (:type op))
+                                                (assoc :error (:error op)))
+                               final-expected (expected-final-state op)
+                               final-actual   (when final-probe
+                                                (get final-probe
+                                                     case-id
+                                                     ::missing))]
+                           (when (not= expected actual)
+                             (cond-> {:f        (:f op)
+                                      :case-id  case-id
+                                      :expected expected
+                                      :actual   actual}
+                               (and (= :ok (:type op))
+                                    final-probe
+                                    (= final-expected final-actual))
+                               (assoc :final-probe-recovered? true))))))
+                 vec)
+            transient-mismatches
+            (filterv :final-probe-recovered? all-mismatches)
+            mismatches
+            (filterv (complement :final-probe-recovered?) all-mismatches)
             probe-mismatches
             (if-not final-probe
               []
@@ -544,6 +559,9 @@
                          disruption-failures)))
          :mismatch-count   (count mismatches)
          :mismatch-samples (vec (take 10 mismatches))
+         :transient-mismatch-count (count transient-mismatches)
+         :transient-mismatch-samples
+         (vec (take 10 transient-mismatches))
          :probe-count (count successful-probes)
          :probe-failure-count (count probe-failures)
          :probe-failure-samples

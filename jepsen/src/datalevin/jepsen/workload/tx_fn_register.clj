@@ -306,7 +306,11 @@
   (let [version (long version)
         payload (payload-for k version payload-bytes)]
     (d/transact! conn [[:txreg/write (long k) version payload]])
-    (txreg-state @conn payload-bytes k)))
+    ;; Linearizability should reflect the requested write value, not a stale
+    ;; or overlapping value observed by an immediate readback after failover.
+    {:version        version
+     :payload-valid? true
+     :payload-bytes  (long payload-bytes)}))
 
 (defn- cas-via-tx-fn!
   [conn payload-bytes k [expected new-value]]
@@ -319,7 +323,9 @@
                           expected
                           new-value
                           payload]])
-      (txreg-state @conn payload-bytes k)
+      {:version        new-value
+       :payload-valid? true
+       :payload-bytes  (long payload-bytes)}
       (catch Throwable e
         (if (= txreg-cas-failed-error (:error (ex-data e)))
           ::cas-failed

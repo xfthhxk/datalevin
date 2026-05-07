@@ -132,6 +132,34 @@
       (finally
         (u/delete-files dir)))))
 
+(deftest follower-local-applied-lsn-clamps-to-payload-floor-test
+  (let [dir (u/tmp-dir (str "ha-follower-payload-floor-test-"
+                            (UUID/randomUUID)))]
+    (try
+      (let [db (d/open-kv dir {:wal? true})]
+        (try
+          (d/open-dbi db "a")
+          (dotimes [i 10]
+            (is (= :transacted
+                   (d/transact-kv db [[:put "a" i i]]))))
+          ;; Simulate a follower that durably appended/recovered WAL through
+          ;; LSN 10, but only materialized payload rows through LSN 7.
+          (i/transact-kv (kv/raw-lmdb db)
+                         c/kv-info
+                         [[:put c/wal-local-payload-lsn 7]]
+                         :keyword
+                         :data)
+          (let [m {:ha-role :follower
+                   :store db
+                   :ha-local-last-applied-lsn 10
+                   :ha-follower-next-lsn 11}]
+            (is (= 7 (store/read-ha-local-last-applied-lsn m)))
+            (is (= 7 (store/ha-local-last-applied-lsn m))))
+        (finally
+          (d/close-kv db))))
+      (finally
+        (u/delete-files dir)))))
+
 (deftest bootstrap-uses-installed-store-snapshot-floor-test
   (let [seen-reconcile (atom nil)
         result

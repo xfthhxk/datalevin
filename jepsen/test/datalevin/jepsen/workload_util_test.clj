@@ -1,9 +1,11 @@
 (ns datalevin.jepsen.workload-util-test
   (:require
    [clojure.test :refer [deftest is testing]]
+   [datalevin.conn :as conn]
    [datalevin.jepsen.workload.identity-upsert :as identity-upsert]
    [datalevin.jepsen.workload.index-consistency :as index-consistency]
    [datalevin.jepsen.workload.internal :as internal]
+   [datalevin.jepsen.workload.tx-fn-register :as tx-fn-register]
    [datalevin.jepsen.workload.util :as workload.util]
    [jepsen.checker :as checker]
    [jepsen.history :as history]))
@@ -196,3 +198,62 @@
     (is (= 0 (:mismatch-count result)))
     (is (= 0 (:failure-count result)))
     (is (= 1 (:indeterminate-count result)))))
+
+(deftest index-consistency-checker-allows-transient-read-back-mismatch-test
+  (let [op     {:f :ref-create
+                :index/case-id 8}
+        result (checker/check
+                (#'index-consistency/index-consistency-checker)
+                {}
+                (history/history
+                 [(assoc op
+                         :process 0
+                         :type :ok
+                         :value [])
+                  {:process 0
+                   :type :ok
+                   :f :probe
+                   :value {8 (#'index-consistency/expected-final-state op)}}])
+                nil)]
+    (is (true? (:valid? result)) (pr-str result))
+    (is (= 0 (:mismatch-count result)))
+    (is (= 1 (:transient-mismatch-count result)))
+    (is (= 0 (:probe-mismatch-count result)))))
+
+(deftest tx-fn-register-write-reports-requested-value-test
+  (let [txs (atom [])]
+    (with-redefs [conn/transact! (fn
+                                    ([_conn tx]
+                                     (swap! txs conj tx)
+                                     {:tx-data []})
+                                    ([_conn tx _tx-meta]
+                                     (swap! txs conj tx)
+                                     {:tx-data []}))]
+      (let [result (#'tx-fn-register/write-via-tx-fn!
+                    (atom ::stale-db)
+                    128
+                    1
+                    29)]
+        (is (= 29 (:version result)))
+        (is (true? (:payload-valid? result)))
+        (is (= 128 (:payload-bytes result)))
+        (is (= 1 (count @txs)))))))
+
+(deftest tx-fn-register-cas-reports-requested-new-value-test
+  (let [txs (atom [])]
+    (with-redefs [conn/transact! (fn
+                                    ([_conn tx]
+                                     (swap! txs conj tx)
+                                     {:tx-data []})
+                                    ([_conn tx _tx-meta]
+                                     (swap! txs conj tx)
+                                     {:tx-data []}))]
+      (let [result (#'tx-fn-register/cas-via-tx-fn!
+                    (atom ::stale-db)
+                    128
+                    1
+                    [13 29])]
+        (is (= 29 (:version result)))
+        (is (true? (:payload-valid? result)))
+        (is (= 128 (:payload-bytes result)))
+        (is (= 1 (count @txs)))))))

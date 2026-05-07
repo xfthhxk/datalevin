@@ -299,20 +299,39 @@
 (declare read-ha-local-watermark-lsn)
 (declare read-ha-local-last-applied-lsn)
 
+(defn- ha-materialized-follower-lsn
+  [snapshot-lsn payload-lsn]
+  (long-max2 snapshot-lsn payload-lsn))
+
+(defn- ha-follower-data-lsn-ceiling
+  [watermark-lsn snapshot-lsn payload-lsn]
+  (let [watermark-lsn (long watermark-lsn)
+        materialized-lsn (long (ha-materialized-follower-lsn snapshot-lsn
+                                                             payload-lsn))]
+    (cond
+      (zero? materialized-lsn)
+      watermark-lsn
+
+      (zero? (long watermark-lsn))
+      materialized-lsn
+
+      :else
+      (long-min2 watermark-lsn materialized-lsn))))
+
 (defn- ha-local-data-lsn-ceiling
   [m kv-store]
   (let [role (:ha-role m)
         watermark-lsn (read-ha-local-watermark-lsn m)
         snapshot-lsn (read-ha-local-snapshot-current-lsn kv-store)
-        payload-lsn (if (= :leader role)
-                      (read-ha-local-payload-lsn kv-store)
-                      0)]
+        payload-lsn (read-ha-local-payload-lsn kv-store)]
     {:snapshot-lsn snapshot-lsn
      :watermark-lsn watermark-lsn
      :payload-lsn payload-lsn
      :ceiling-lsn (long (if (= :leader role)
                           (long-max3 watermark-lsn snapshot-lsn payload-lsn)
-                          (long-max2 watermark-lsn snapshot-lsn)))}))
+                          (ha-follower-data-lsn-ceiling watermark-lsn
+                                                        snapshot-lsn
+                                                        payload-lsn)))}))
 
 (defn- ha-clamped-follower-floor-lsn
   [persisted-lsn snapshot-lsn ceiling-lsn]
@@ -339,16 +358,16 @@
         role (:ha-role m)
         watermark-lsn (read-ha-local-watermark-lsn* kv-store)
         snapshot-lsn (read-ha-local-snapshot-current-lsn kv-store)
-        payload-lsn (if (= :leader role)
-                      (read-ha-local-payload-lsn kv-store)
-                      0)
+        payload-lsn (read-ha-local-payload-lsn kv-store)
         persisted-lsn (long (read-ha-local-persisted-lsn kv-store))
         ceiling-lsn (long (if (= :leader role)
                             (long-max3 watermark-lsn
                                        snapshot-lsn
                                        payload-lsn)
-                            (long-max2 watermark-lsn
-                                       snapshot-lsn)))
+                            (ha-follower-data-lsn-ceiling
+                             watermark-lsn
+                             snapshot-lsn
+                             payload-lsn)))
         follower-floor-lsn
         (ha-clamped-follower-floor-lsn
          persisted-lsn snapshot-lsn ceiling-lsn)
