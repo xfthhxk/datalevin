@@ -3,8 +3,8 @@
 (defproject datalevin version
   :description "A simple, fast and versatile Datalog database"
   :url "https://github.com/datalevin/datalevin"
-  :license {:name "EPL-1.0"
-            :url  "https://www.eclipse.org/legal/epl-1.0/"}
+  :license {:name "EPL-2.0"
+            :url  "https://www.eclipse.org/legal/epl-2.0/"}
   :managed-dependencies
   [[babashka/babashka.pods "0.2.0"]
    [com.alipay.sofa/jraft-core "1.4.0"]

@@ -2,10 +2,12 @@
   (:require
    [clojure.test :refer [deftest is]]
    [datalevin.interface :as i]
-   [datalevin.server :as srv])
+   [datalevin.server :as srv]
+   [datalevin.server.dispatch :as dispatch]
+   [datalevin.server.handlers :as handlers])
   (:import
    [java.util.concurrent ConcurrentHashMap ConcurrentLinkedQueue CountDownLatch
-    FutureTask TimeUnit]
+    FutureTask Semaphore TimeUnit]
    [java.util.concurrent.atomic AtomicBoolean]))
 
 (defn- test-server
@@ -117,3 +119,37 @@
     (is (false? (.get follower-running?)))
     (is (.isCancelled renew-future))
     (is (.isCancelled follower-future))))
+
+(deftest copy-message-uses-handler-scoped-runtime-read-lock-test
+  (is (false? (#'dispatch/runtime-read-access-message?
+               {:type :copy
+                :args ["db"]})))
+  (is (#'dispatch/runtime-read-access-message?
+       {:type :db-info
+        :args ["db"]}))
+  (is (false? (#'dispatch/runtime-read-access-message?
+               {:type :db-info
+                :args ["db"]
+                :writing? true}))))
+
+(deftest copy-transaction-slot-rejects-active-write-transaction-test
+  (let [^Semaphore lock (Semaphore. 1)
+        deps            {:get-lock (fn [_ _] lock)}]
+    (.acquire lock)
+    (try
+      (is (thrown-with-msg?
+           clojure.lang.ExceptionInfo
+           #"write transaction is active"
+           (#'handlers/with-copy-db-transaction-slot
+            deps nil "db" (fn [] :copied))))
+      (is (zero? (.availablePermits lock)))
+      (finally
+        (.release lock)))))
+
+(deftest copy-transaction-slot-releases-after-success-test
+  (let [^Semaphore lock (Semaphore. 1)
+        deps            {:get-lock (fn [_ _] lock)}]
+    (is (= :copied
+           (#'handlers/with-copy-db-transaction-slot
+            deps nil "db" (fn [] :copied))))
+    (is (= 1 (.availablePermits lock)))))

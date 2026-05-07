@@ -5,9 +5,9 @@
 ### Changed
 - [Datalog] The default write mode for embedded store is returned to `:wal?
   false`, as it is safe and fast. `:wal? true` is opt in. However, once opted
-  in, the default is `:wal-durability-profile :relaxted`, so as to meet user's
-  expectation of enhanced throughput. Server mode continues to default to `:wal?
-  true` and `:wal-durability-profile :strict`.
+  in, the default is `:wal-durability-profile :relaxed`, so as to meet user's
+  expectation of enhanced throughput. Consensus-lease HA continues to force
+  `:wal? true` and default to `:wal-durability-profile :strict`.
 
 ### Added
 - [Server] Read only replicas and high availability (HA) cluster with Raft
@@ -18,34 +18,37 @@
   correctness [#252](https://github.com/datalevin/datalevin/issues/252). Details
   in [doc](jepsen/README.md).
 - [API] JSON API. [#182](https://github.com/datalevin/datalevin/issues/182)
-- [Lib] Release a trimmed down embedded use only jar
+- [Lib] Release a trimmed down embedded-use-only jar
   `org.datalevin/datalevin-embedded:<version>` to Clojars. This jar does not
-  contains code for server/HA/pod and related dependencies.
+  contain code for server/HA/pod and related dependencies.
 - [Lib] Release Datalevin as a Java library
-  `org.datalevin:datalevin-java:<version>` to maven central, for embedded use.
-- [Lib] Release Datalevin as a Python library `datalevin`to PyPI, for embedded
+  `org.datalevin:datalevin-java:<version>` to Maven Central, for embedded use.
+- [Lib] Release Datalevin as a Python library `datalevin` to PyPI, for embedded
   use.
-- [Lib] Release Datalevin as a Javascript Node.js library `datalevin-node` to
+- [Lib] Release Datalevin as a JavaScript Node.js library `datalevin-node` to
   npm, for embedded use.
-- [Datalog] Allow to register a `:db/udf` to specify a user defined function.
-  This feature is language agnostic, resolving in runtime environment and does
-  not persist in DB. So a UDF function can be written in Java, Python or
-  Javascript, in addition to Clojure.
+- [Datalog] Allow registering a `:db/udf` to specify a user-defined function.
+  This feature is language-agnostic, resolves in the runtime environment, and
+  does not persist in DB. So a UDF can be written in Java, Python, or
+  JavaScript, in addition to Clojure.
 - [AI] Built-in stdio based MCP server. Details in [doc](doc/mcp.md).
 - [AI] Built-in trimmed down llama.cpp that supports CPU only inference for text
-  embedding, text generation and OCR. Models need to be downloaded separately.
+  embedding and text generation. With a compatible OCR-capable generation model,
+  the same generation path can be used for OCR. Models need to be downloaded
+  separately.
 - [Datalog] Allow `:db/embedding true` property for string attributes, which
   will use an embedding model to embed the texts into vectors and index them.
   A default embedding model `multilingual-e5-small-Q8_0.gguf` is downloaded from
-  HuggingFace on first use. This small 384 dimensions model is sufficient for
+  Hugging Face on first use. This small 384-dimensional model is sufficient for
   short text snippets embedding. For large and complex text passages, user
-  should download a larger model in GGUF format, or use an OpeanAI compatible
+  should download a larger model in GGUF format, or use an OpenAI-compatible
   external LLM provider instead.
-- [Datalog] For embedding enabled datoms, `embedding-neighbors` built-in function to
-  return `[e, a, v]` based on vector similarity. Details in [doc](doc/vector.md).
+- [Datalog] For embedding-enabled datoms, `embedding-neighbors` built-in
+  function returns `[e, a, v]` based on vector similarity. Details in
+  [doc](doc/vector.md).
 - [Search] `:display :refs+scores` to show relevance score.
 - [Async] A semaphore to limit the number of async jobs in backlog. Will
-  block if the backlog is full (min of 4098 and 1024 * cores).
+  block if the backlog is full (max of 4098 and 1024 * cores).
 - clj-kondo config [#357](https://github.com/datalevin/datalevin/issues/357).
 - [KV] Add a registry to track cached reader txn with its thread, so the
   corresponding reader slot can be released when the thread is gone. This
@@ -981,7 +984,7 @@ large transactions.
 
 ## 0.7.4 (2022-12-15)
 ### Fixed
-- typo prevent build on CI
+- typo that prevented build on CI
 
 ## 0.7.3 (2022-12-15)
 ### Fixed

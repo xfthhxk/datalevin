@@ -147,6 +147,19 @@
        :reason :write-transaction-open
        :db-name db-name})))
 
+(defn- with-copy-db-transaction-slot
+  [deps server db-name f]
+  (let [^Semaphore lock (db-lock deps server db-name)]
+    (if (.tryAcquire lock)
+      (try
+        (f)
+        (finally
+          (.release lock)))
+      (u/raise
+       "Cannot copy database while a write transaction is active; retry later"
+       {:error :db/copy-write-transaction-active
+        :db-name db-name}))))
+
 (defn- with-direct-db-transaction-slot
   [deps server db-name writing? f]
   (if writing?
@@ -1242,12 +1255,13 @@
            db-name
            writing?
            (fn []
+             ;; Snapshot copy must not race an open write transaction or a
+             ;; runtime store swap/reopen.
              (with-runtime-store-read-access
                deps
                server
                db-name
                (fn []
-                 ;; Snapshot copy must not race a runtime store swap/reopen.
                  (with-transient-runtime-store-retry
                    (fn []
                      (let [source-store (kv-store deps server skey db-name

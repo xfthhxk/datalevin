@@ -264,7 +264,9 @@
 
   (more ^ISeq [this] (let [s (.next this)] (if s s '())))
 
-  (cons [_ _] (throw "Changing SpillableVector.SVecSeq is not supported"))
+  (cons [_ _]
+    (throw (UnsupportedOperationException.
+             "Changing SpillableVector.SVecSeq is not supported")))
 
   (count [_] (- (count v) i))
 
@@ -287,7 +289,9 @@
 
   (more ^ISeq [this] (let [s (.next this)] (if s s '())))
 
-  (cons [_ _] (throw "Changing SpillableVector.RSVecSeq is not supported"))
+  (cons [_ _]
+    (throw (UnsupportedOperationException.
+             "Changing SpillableVector.RSVecSeq is not supported")))
 
   (count [_] (inc i))
 

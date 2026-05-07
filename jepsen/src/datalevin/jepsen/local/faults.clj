@@ -66,6 +66,7 @@
    "Timed out waiting for single leader"
    "Socket channel is closed."
    "ClosedChannelException"
+   "This client is closed"
    "Unable to connect to server:"
    "Connection refused"
    "Connection reset by peer"
