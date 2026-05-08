@@ -401,19 +401,25 @@
                                      (long (or (:snapshot-last-applied-lsn
                                                 manifest)
                                                0))))
-                          snapshot-lsn
-                          local-snapshot-lsn
-                          trusted-install-lsn
-                          (long (max snapshot-lsn
-                                     manifest-snapshot-lsn
+                          manifest-payload-lsn
+                          (long (max 0
                                      (long (or (:payload-last-applied-lsn
                                                 manifest)
                                                0))))
+                          install-floor-lsn
+                          ;; The snapshot copy manifest is computed from the
+                          ;; copied LMDB image. Reopening that image without
+                          ;; the source node's sidecar WAL files can recover
+                          ;; conservative local markers, so use the validated
+                          ;; manifest floor as the bootstrap floor.
+                          (long (max local-snapshot-lsn
+                                     manifest-snapshot-lsn
+                                     manifest-payload-lsn))
                           {:keys [state installed-lsn] :as replay}
                           (reconcile-ha-installed-snapshot-state
                            installed-state
-                           snapshot-lsn
-                           trusted-install-lsn)
+                           install-floor-lsn
+                           install-floor-lsn)
                           persisted-installed-lsn
                           (persist-ha-local-applied-lsn!
                            state
@@ -423,7 +429,7 @@
                            state
                            installed-lsn
                            source-endpoint
-                           snapshot-lsn
+                           install-floor-lsn
                            now-ms
                            persisted-installed-lsn)]
                       (if (< (long installed-lsn) (long required-lsn))
@@ -433,7 +439,10 @@
                                  :message
                                  "HA snapshot copy installed below the required follower floor"
                                  :data {:required-lsn (long required-lsn)
-                                        :snapshot-last-applied-lsn snapshot-lsn
+                                        :snapshot-last-applied-lsn
+                                        install-floor-lsn
+                                        :local-snapshot-last-applied-lsn
+                                        local-snapshot-lsn
                                         :installed-last-applied-lsn installed-lsn
                                         :resume-next-lsn
                                         (unchecked-inc (long installed-lsn))
@@ -451,7 +460,7 @@
                                                 :ha-follower-bootstrap-source-endpoint
                                                 source-endpoint
                                                 :ha-follower-bootstrap-snapshot-last-applied-lsn
-                                                snapshot-lsn))]
+                                                install-floor-lsn))]
                             {:ok? true
                              :state next-state})
                           (catch Exception e
@@ -463,7 +472,9 @@
                                      :data (merge
                                             (or (ex-data e) {})
                                             {:snapshot-last-applied-lsn
-                                             snapshot-lsn
+                                             install-floor-lsn
+                                             :local-snapshot-last-applied-lsn
+                                             local-snapshot-lsn
                                              :installed-last-applied-lsn
                                              installed-lsn
                                              :resume-next-lsn

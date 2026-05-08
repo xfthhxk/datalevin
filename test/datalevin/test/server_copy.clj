@@ -16,18 +16,29 @@
    [datalevin.server.copy :as scopy]))
 
 (defn- fake-kv-store
-  [values]
-  (reify i/ILMDB
-    (closed-kv? [_] false)
-    (env-opts [_] (:env-opts values))
-    (get-value [_ dbi-name k]
-      (get values [dbi-name k]))
-    (get-value [_ dbi-name k _k-type]
-      (get values [dbi-name k]))
-    (get-value [_ dbi-name k _k-type _v-type]
-      (get values [dbi-name k]))
-    (get-value [_ dbi-name k _k-type _v-type _ignore-key?]
-      (get values [dbi-name k]))))
+  ([values]
+   (fake-kv-store values nil))
+  ([values sync-calls]
+   (reify i/ILMDB
+     (closed-kv? [_] false)
+     (env-opts [_] (:env-opts values))
+     (sync [_]
+       (when sync-calls
+         (swap! sync-calls conj nil))
+       {:synced? true})
+     (sync [_ force]
+       (when sync-calls
+         (swap! sync-calls conj force))
+       {:synced? true
+        :force force})
+     (get-value [_ dbi-name k]
+       (get values [dbi-name k]))
+     (get-value [_ dbi-name k _k-type]
+       (get values [dbi-name k]))
+     (get-value [_ dbi-name k _k-type _v-type]
+       (get values [dbi-name k]))
+     (get-value [_ dbi-name k _k-type _v-type _ignore-key?]
+       (get values [dbi-name k])))))
 
 (deftest copy-response-meta-uses-copied-store-payload-lsn-test
   (let [copied-store
@@ -48,3 +59,10 @@
                :db-identity
                :snapshot-last-applied-lsn
                :payload-last-applied-lsn]))))))
+
+(deftest sync-copy-response-store-syncs-copied-lmdb-test
+  (let [sync-calls (atom [])
+        copied-store (fake-kv-store {} sync-calls)]
+    (is (identical? copied-store
+                    (scopy/sync-copy-response-store! copied-store)))
+    (is (= [1] @sync-calls))))

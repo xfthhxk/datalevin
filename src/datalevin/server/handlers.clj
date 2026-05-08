@@ -1289,7 +1289,8 @@
                                        :duration-ms (- completed-ms started-ms)
                                        :compact? (boolean compact?)}
                                 (map? @copy-backup-pin)
-                                (assoc :backup-pin @copy-backup-pin)))]
+                                (assoc :backup-pin @copy-backup-pin)))
+                   _ ((:sync-copy-response-store! deps) copied-store)]
                ((:copy-server-file-out! deps) skey path copy-meta))
              (finally
                (when-not (i/closed? copied-store)

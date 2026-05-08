@@ -203,3 +203,9 @@
 
       (some? payload-lsn)
       (assoc :payload-last-applied-lsn (long payload-lsn)))))
+
+(defn sync-copy-response-store!
+  [store]
+  (when-let [kv-store (copy-source-kv-store store)]
+    (i/sync kv-store 1))
+  store)

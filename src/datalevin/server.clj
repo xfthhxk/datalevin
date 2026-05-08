@@ -1021,6 +1021,10 @@
   [db-name store base-meta]
   (scopy/copy-response-meta db-name store base-meta))
 
+(defn- sync-copy-response-store!
+  [store]
+  (scopy/sync-copy-response-store! store))
+
 (defn- open-port
   [port]
   (try
@@ -1741,6 +1745,7 @@
    :server-copy-store! server-copy-store!
    :store store
    :store->db-name store->db-name
+   :sync-copy-response-store! sync-copy-response-store!
    :store-closed? store-closed?
    :sys-conn (fn [^Server server] (.-sys-conn server))
    :unpin-server-copy-backup-floor! unpin-server-copy-backup-floor!

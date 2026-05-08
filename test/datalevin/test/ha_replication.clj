@@ -160,7 +160,7 @@
       (finally
         (u/delete-files dir)))))
 
-(deftest bootstrap-uses-installed-store-snapshot-floor-test
+(deftest bootstrap-uses-validated-copy-manifest-floor-test
   (let [seen-reconcile (atom nil)
         result
         (boot/bootstrap-ha-follower-from-snapshot*
@@ -211,9 +211,9 @@
          9
          1234)]
     (is (true? (:ok? result)))
-    (is (= [8 16] @seen-reconcile))
-    (is (= 9 (get-in result [:state :resume-next-lsn])))
-    (is (= [8 "127.0.0.1:19001" 8 1234 8]
+    (is (= [16 16] @seen-reconcile))
+    (is (= 17 (get-in result [:state :resume-next-lsn])))
+    (is (= [16 "127.0.0.1:19001" 16 1234 16]
            (get-in result [:state :noted])))))
 
 (deftest bootstrap-rejects-installed-copy-below-required-floor-test
@@ -274,4 +274,7 @@
     (is (= :ha/follower-snapshot-installed-too-stale
            (get-in result [:errors 0 :error])))
     (is (= 11 (get-in result [:errors 0 :data :required-lsn])))
+    (is (= 16 (get-in result [:errors 0 :data :snapshot-last-applied-lsn])))
+    (is (= 8 (get-in result
+                     [:errors 0 :data :local-snapshot-last-applied-lsn])))
     (is (= 8 (get-in result [:errors 0 :data :installed-last-applied-lsn])))))
