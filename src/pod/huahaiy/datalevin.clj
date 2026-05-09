@@ -1023,29 +1023,42 @@
           [binding & body]
           `(let [db# ~(second binding)]
             (try
-              (let [~(first binding) (open-transact-kv db#)]
+              (let [res# (let [~(first binding) (open-transact-kv db#)]
+                           (try
+                             ~@body
+                             (catch Exception ~'e
+                               (if (:resized (ex-data ~'e))
+                                 (do ~@body)
+                                 (throw ~'e)))))]
+                (close-transact-kv db#)
+                res#)
+              (catch Throwable t#
                 (try
-                  ~@body
-                  (catch Exception ~'e
-                    (if (:resized (ex-data ~'e))
-                      (do ~@body)
-                      (throw ~'e)))))
-              (finally
-                (close-transact-kv db#)))))"}
+                  (abort-transact-kv db#)
+                  (catch Throwable abort-error#
+                    (.addSuppressed t# abort-error#)))
+                (throw t#)))))"}
      {"name" "with-transaction"
       "code"
       "(defmacro with-transaction
           [binding & body]
           `(let [conn# ~(second binding)]
             (try
-              (let [~(first binding) (open-transact conn#)]
+              (let [res# (let [~(first binding) (open-transact conn#)]
+                           (try
+                             ~@body
+                             (catch Exception ~'e
+                               (if (:resized (ex-data ~'e))
+                                 (do ~@body)
+                                 (throw ~'e)))))]
+                (close-transact conn#)
+                res#)
+              (catch Throwable t#
                 (try
-                  ~@body
-                  (catch Exception ~'e
-                    (if (:resized (ex-data ~'e))
-                      (do ~@body)
-                      (throw ~'e)))))
-              (finally (close-transact conn#)))))"}
+                  (abort-transact conn#)
+                  (catch Throwable abort-error#
+                    (.addSuppressed t# abort-error#)))
+                (throw t#)))))"}
      {"name" "transact-async"
       "code"
       "(defn transact-async

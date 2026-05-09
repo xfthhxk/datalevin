@@ -22,7 +22,8 @@
    [datalevin.constants :as c]
    [datalevin.interface
     :refer [close-kv list-dbis entries get-range open-dbi transact-kv clear-dbi
-            env-dir copy open-transact-kv close-transact-kv stat]])
+            env-dir copy open-transact-kv close-transact-kv abort-transact-kv
+            stat]])
   (:import
    [datalevin.async IAsyncWork]
    [datalevin.cpp Util]
@@ -356,6 +357,17 @@
 
 (defn resized? [e] (:resized (ex-data e)))
 
+(defn abort-open-transaction-kv!
+  [db primary]
+  (try
+    (abort-transact-kv db)
+    (catch Throwable abort-error
+      (.addSuppressed ^Throwable primary abort-error)))
+  (try
+    (close-transact-kv db)
+    (catch Throwable close-error
+      (.addSuppressed ^Throwable primary close-error))))
+
 (defn data-size
   "data size in bytes, excluding kv-info DBI"
   [db]
@@ -393,18 +405,22 @@
            condition#
          (try
            (vreset! opened?# false)
-           (let [~db (if writing#
-                       ~orig-db
-                       (let [db# (open-transact-kv ~orig-db)]
-                         (vreset! opened?# true)
-                         db#))]
-             (u/repeat-try-catch
-                 ~c/+in-tx-overflow-times+
-                 condition#
-               ~@body))
-           (finally
+           (let [res# (let [~db (if writing#
+                                  ~orig-db
+                                  (let [db# (open-transact-kv ~orig-db)]
+                                    (vreset! opened?# true)
+                                    db#))]
+                        (u/repeat-try-catch
+                            ~c/+in-tx-overflow-times+
+                            condition#
+                          ~@body))]
              (when (and (not writing#) @opened?#)
-               (close-transact-kv ~orig-db))))))))
+               (close-transact-kv ~orig-db))
+             res#)
+           (catch Throwable t#
+             (when (and (not writing#) @opened?#)
+               (abort-open-transaction-kv! ~orig-db t#))
+             (throw t#)))))))
 
 ;; for shutting down various executors when the last LMDB exits
 (defonce lmdb-dirs (atom #{}))

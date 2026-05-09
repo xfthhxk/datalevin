@@ -337,6 +337,55 @@
       (finally
         (u/delete-files dir)))))
 
+(deftest test-with-transaction-kv-aborts-on-exception
+  (let [dir (u/tmp-dir (str "with-tx-kv-abort-on-error-test-"
+                            (UUID/randomUUID)))]
+    (try
+      (let [db (d/open-kv dir {:wal? false})]
+        (try
+          (d/open-dbi db "a")
+          (is (thrown-with-msg?
+               Exception
+               #"boom"
+               (d/with-transaction-kv [tx db]
+                 (d/transact-kv tx [[:put "a" :k :v]])
+                 (throw (ex-info "boom" {})))))
+          (is (nil? (d/get-value db "a" :k)))
+          (is (= :transacted
+                 (d/transact-kv db [[:put "a" :after :ok]])))
+          (is (= :ok (d/get-value db "a" :after)))
+          (finally
+            (d/close-kv db))))
+      (finally
+        (u/delete-files dir)))))
+
+(deftest test-with-transaction-aborts-on-exception
+  (let [dir    (u/tmp-dir (str "with-tx-abort-on-error-test-"
+                               (UUID/randomUUID)))
+        schema {:name {:db/valueType :db.type/string}}]
+    (try
+      (let [conn (d/create-conn dir schema {:wal? false})]
+        (try
+          (is (thrown-with-msg?
+               Exception
+               #"boom"
+               (d/with-transaction [tx conn]
+                 (d/transact! tx [{:db/id 1 :name "partial"}])
+                 (throw (ex-info "boom" {})))))
+          (is (empty?
+               (d/q '[:find [?e ...]
+                      :where [?e :name "partial"]]
+                    @conn)))
+          (d/transact! conn [{:db/id 2 :name "after"}])
+          (is (= #{2}
+                 (set (d/q '[:find [?e ...]
+                             :where [?e :name "after"]]
+                           @conn))))
+          (finally
+            (d/close conn))))
+      (finally
+        (u/delete-files dir)))))
+
 (deftest test-open-kv-rejects-second-local-handle-in-process
   (let [dir (u/tmp-dir (str "open-kv-duplicate-handle-test-"
                             (UUID/randomUUID)))]
