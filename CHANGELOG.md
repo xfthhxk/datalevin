@@ -2,13 +2,6 @@
 
 ## WIP
 
-### Changed
-- [Datalog] The default write mode for embedded store is returned to `:wal?
-  false`, as it is safe and fast. `:wal? true` is opt in. However, once opted
-  in, the default is `:wal-durability-profile :relaxed`, so as to meet user's
-  expectation of enhanced throughput. Consensus-lease HA continues to force
-  `:wal? true` and default to `:wal-durability-profile :strict`.
-
 ### Added
 - [Server] Read only replicas and high availability (HA) cluster with Raft
   consensus based auto roll-over and promotion
@@ -53,6 +46,13 @@
 - [KV] Add a registry to track cached reader txn with its thread, so the
   corresponding reader slot can be released when the thread is gone. This
   handles the often lamented reader slot exhaustion problem.
+
+### Changed
+- [Datalog] The default write mode for embedded store is returned to `:wal?
+  false`, as it is safe and fast. `:wal? true` is opt in. However, once opted
+  in, the default is `:wal-durability-profile :relaxed`, so as to meet user's
+  expectation of enhanced throughput. Consensus-lease HA continues to force
+  `:wal? true` and default to `:wal-durability-profile :strict`.
 
 ### Fixed
 - [WAL] DB startup slow down in WAL mode

@@ -1,0 +1,40 @@
+{:hooks
+ {:analyze-call
+  {datalevin.scan/scan hooks.datalevin/scan
+   datalevin.search/candidate-array hooks.datalevin/candidate-array
+   datalevin.util/cond+ hooks.datalevin/cond-plus
+   datalevin.util/defcomp hooks.datalevin/defcomp
+   datalevin.util/import-macro hooks.datalevin/import-macro
+   datalevin.interpret/inter-fn hooks.datalevin/inter-fn
+   datalevin.interpret/definterfn hooks.datalevin/definterfn
+   datalevin.conn/with-conn hooks.datalevin/with-binding
+   datalevin.conn/with-transaction hooks.datalevin/with-binding
+   datalevin.core/with-conn hooks.datalevin/with-binding
+   datalevin.core/with-transaction hooks.datalevin/with-binding
+   datalevin.core/with-transaction-kv hooks.datalevin/with-binding
+   datalevin.lmdb/with-transaction-kv hooks.datalevin/with-binding
+   pod.huahaiy.datalevin/defpodfn hooks.datalevin/defpodfn
+   pod.huahaiy.datalevin/with-transaction hooks.datalevin/with-binding
+   pod.huahaiy.datalevin/with-transaction-kv hooks.datalevin/with-binding
+   taoensso.nippy/extend-freeze hooks.datalevin/extend-freeze
+   taoensso.nippy/extend-thaw hooks.datalevin/extend-thaw}}
+
+ :lint-as
+ {datalevin.parser/deftrecord clojure.core/defrecord
+  datalevin.util/defrecord-updatable clojure.core/defrecord}
+
+ :skip-comments true
+
+ :linters
+ {:datalog-syntax {:level :warning}
+  :unresolved-var
+  {:exclude [taoensso.nippy/*freeze-serializable-allowlist*
+             taoensso.nippy/*thaw-serializable-allowlist*
+             pod.huahaiy.datalevin/defpodfn
+             pod.huahaiy.datalevin/with-transaction
+             pod.huahaiy.datalevin/with-transaction-kv
+             pod.huahaiy.datalevin/transact-async
+             pod.huahaiy.datalevin/transact-kv-async]}
+  :unresolved-symbol
+  {:exclude [(clojure.test/is [thrown-msg?])
+             (clojure.test/are [thrown-msg?])]}}}
