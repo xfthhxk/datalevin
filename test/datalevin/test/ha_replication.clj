@@ -79,6 +79,38 @@
           (is (true? (:ha-follower-source-last-applied-lsn-known? state)))
           (is (= 22 (:ha-follower-source-last-applied-lsn state))))))))
 
+(deftest empty-follower-batch-uses-fresh-materialized-floor-test
+  (let [reported-floor (atom nil)
+        m              {:ha-node-id 2
+                        :ha-local-last-applied-lsn 29
+                        :ha-follower-next-lsn 30
+                        :ha-follower-max-batch-records 8}
+        lease          {:leader-endpoint "127.0.0.1:19001"
+                        :leader-last-applied-lsn 29}]
+    (with-redefs-fn
+      {#'drep/reopen-ha-local-store-if-needed identity
+       #'drep/fetch-ha-follower-records-with-gap-fallback
+       (fn [_db-name _m _lease _next-lsn _upto-lsn]
+         {:records []
+          :source-endpoint "127.0.0.1:19001"
+          :source-order ["127.0.0.1:19001"]
+          :source-order-dynamic? false
+          :source-last-applied-lsn-known? true
+          :source-last-applied-lsn 29})
+       #'drep/read-ha-local-last-applied-lsn
+       (constantly 21)
+       #'drep/report-ha-replica-floor!
+       (fn [_db-name _m leader-endpoint applied-lsn]
+         (reset! reported-floor [leader-endpoint applied-lsn]))
+       #'drep/refresh-ha-local-dt-db identity}
+      (fn []
+        (let [{:keys [applied-lsn state]}
+              (#'drep/sync-ha-follower-batch "db" m lease 30 1000)]
+          (is (= ["127.0.0.1:19001" 21] @reported-floor))
+          (is (= 21 applied-lsn))
+          (is (= 21 (:ha-local-last-applied-lsn state)))
+          (is (= 22 (:ha-follower-next-lsn state))))))))
+
 (deftest bootstrap-tail-clamps-to-contiguous-materialized-prefix-test
   (let [dir (u/tmp-dir (str "ha-bootstrap-tail-test-" (UUID/randomUUID)))]
     (try
@@ -155,6 +187,36 @@
                    :ha-follower-next-lsn 11}]
             (is (= 7 (store/read-ha-local-last-applied-lsn m)))
             (is (= 7 (store/ha-local-last-applied-lsn m))))
+        (finally
+          (d/close-kv db))))
+      (finally
+        (u/delete-files dir)))))
+
+(deftest follower-local-applied-lsn-trusts-copied-payload-floor-test
+  (let [dir (u/tmp-dir (str "ha-follower-copied-payload-floor-test-"
+                            (UUID/randomUUID)))]
+    (try
+      (let [db (d/open-kv dir {:wal? true})]
+        (try
+          (d/open-dbi db "a")
+          (dotimes [i 10]
+            (is (= :transacted
+                   (d/transact-kv db [[:put "a" i i]]))))
+          ;; A snapshot-installed follower can copy payload state beyond the
+          ;; local txlog watermark. The copied payload marker must remain the
+          ;; follower floor instead of being clamped back to the old watermark.
+          (i/transact-kv (kv/raw-lmdb db)
+                         c/kv-info
+                         [[:put c/ha-local-applied-lsn 16]
+                          [:put c/wal-local-payload-lsn 16]]
+                         :keyword
+                         :data)
+          (let [m {:ha-role :follower
+                   :store db
+                   :ha-local-last-applied-lsn 16
+                   :ha-follower-next-lsn 17}]
+            (is (= 16 (store/read-ha-local-last-applied-lsn m)))
+            (is (= 16 (store/ha-local-last-applied-lsn m))))
         (finally
           (d/close-kv db))))
       (finally

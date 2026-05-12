@@ -1972,9 +1972,11 @@
           ;; speculative cursor cannot skip missing rows forever.
           current-local-floor-lsn
           (long (max 0
-                     (long (or (:ha-local-last-applied-lsn next-m)
-                               (:ha-local-last-applied-lsn m)
-                               0))))
+                     (if (seq records)
+                       (long (or (:ha-local-last-applied-lsn next-m)
+                                 (:ha-local-last-applied-lsn m)
+                                 0))
+                       (long (read-ha-local-last-applied-lsn next-m)))))
           applied-lsn (long (or last-record-lsn
                                 current-local-floor-lsn))
           next-fetch-lsn

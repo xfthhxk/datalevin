@@ -308,15 +308,12 @@
   (let [watermark-lsn (long watermark-lsn)
         materialized-lsn (long (ha-materialized-follower-lsn snapshot-lsn
                                                              payload-lsn))]
-    (cond
-      (zero? materialized-lsn)
-      watermark-lsn
-
-      (zero? (long watermark-lsn))
+    ;; Snapshot-installed followers can have copied payload state ahead of the
+    ;; local txlog watermark. When the payload/snapshot marker exists, it is
+    ;; the materialized floor; otherwise fall back to the txlog watermark.
+    (if (pos? materialized-lsn)
       materialized-lsn
-
-      :else
-      (long-min2 watermark-lsn materialized-lsn))))
+      watermark-lsn)))
 
 (defn- ha-local-data-lsn-ceiling
   [m kv-store]

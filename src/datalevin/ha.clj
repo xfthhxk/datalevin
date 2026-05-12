@@ -872,7 +872,9 @@
               authority-term (:ha-authority-term m)
               now-nanos (ha-now-nanos)
               leader-fencing-pending? (true? (:ha-leader-fencing-pending? m))
-              leader-fencing-error (:ha-leader-fencing-last-error m)]
+              leader-fencing-error (:ha-leader-fencing-last-error m)
+              clock-skew-block-reason
+              (ha-clock-skew-promotion-block-reason m now-ms)]
           (cond
             (= role :demoting)
             (assoc-ha-retry-after-ms
@@ -900,6 +902,14 @@
                     (:ha-clock-skew-last-check-ms m)
                     :ha-clock-skew-last-observed-ms
                     (:ha-clock-skew-last-observed-ms m)
+                    :retryable? true})
+
+            clock-skew-block-reason
+            (merge common-meta
+                   {:error :ha/write-rejected
+                    :reason clock-skew-block-reason
+                    :ha-clock-skew-error
+                    (ha-clock-skew-promotion-failure-details m now-ms)
                     :retryable? true})
 
             authority-read-failure
