@@ -259,6 +259,10 @@
   "dbi name for persisted HA client write replay records is `datalevin/ha-client-ops`"
   "datalevin/ha-client-ops")
 
+(def ^:const secondary-index-jobs
+  "dbi name for durable async secondary index jobs is `datalevin/secondary-index-jobs`"
+  "datalevin/secondary-index-jobs")
+
 ;; compression
 
 (def ^:no-doc ^:const +key-compress-num-symbols+ 65536)

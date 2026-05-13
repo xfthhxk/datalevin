@@ -20,6 +20,7 @@ benchmarks/JOB-bench/db/data.mdb
 /test-jar/tmp
 /test-jar/target
 /target
+/jepsen/target
 /bench/target
 /classes
 /checkouts

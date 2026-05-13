@@ -18,6 +18,7 @@
    [datalevin.datom :as d]
    [datalevin.udf :as udf]
    [datalevin.constants :as c]
+   [datalevin.secondary-index :as si]
    [datalevin.util :as u]
    [datalevin.bits :as b]
    [datalevin.lmdb :as lmdb])
@@ -897,6 +898,14 @@
                 :where where
                 :domain domain
                 :metric-type metric-type})))
+  (when-let [indexing-mode (:indexing-mode config)]
+    (when-not (si/supported-indexing-modes indexing-mode)
+      (u/raise "Embedding indexing mode is not supported"
+               {:error :store/validation
+                :where where
+                :domain domain
+                :indexing-mode indexing-mode
+                :expected si/supported-indexing-modes})))
   (when-let [metadata (:embedding-metadata config)]
     (when-not (map? metadata)
       (u/raise "Embedding metadata must be a map"
