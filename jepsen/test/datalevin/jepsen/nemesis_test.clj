@@ -57,3 +57,8 @@
       (is (= "still down"
              (get-in result [:errors "n2" :message])))
       (is (pos? (get @attempts "n2" 0))))))
+
+(deftest clock-skew-final-phase-stabilizes-leader-test
+  (is (= [{:type :info :f :clear-clock-skew}
+          {:type :info :f :stabilize-leader}]
+         (#'nemesis/final-phase-ops {:clock-skew? true}))))

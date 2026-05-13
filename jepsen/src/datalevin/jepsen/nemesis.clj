@@ -193,7 +193,8 @@
      (when quorum-loss?
        [{:type :info :f :restore-quorum}])
      (when (and clock-skew? (not clock-skew-failover?))
-       [{:type :info :f :clear-clock-skew}]))))
+       [{:type :info :f :clear-clock-skew}
+        {:type :info :f :stabilize-leader}]))))
 
 (defn expand-fault
   [fault]
