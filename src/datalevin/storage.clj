@@ -22,6 +22,7 @@
    [datalevin.pipe :as p]
    [datalevin.scan :as scan :refer [visit-list*]]
    [datalevin.search :as s]
+   [datalevin.secondary-index :as si]
    [datalevin.idoc :as idoc]
    [datalevin.embedding :as emb]
    [datalevin.vector :as v]
@@ -1425,6 +1426,10 @@
   [^Store store domain]
   (get-in (opts store) [:embedding-domains domain]))
 
+(defn- async-embedding-domain?
+  [^Store store domain]
+  (si/async-indexing? (embedding-domain-config store domain)))
+
 (defn embedding-provider
   [^Store store domain]
   (or (get-in (opts store) [:embedding-domain-providers domain])
@@ -1497,7 +1502,8 @@
                                      :kind  :document
                                      :domain domain}))
                           m
-                          (embedding-attr-domains attr props))
+                          (remove #(async-embedding-domain? store %)
+                                  (embedding-attr-domains attr props)))
                         m)))
                   {}
                   datoms)]
@@ -1546,7 +1552,8 @@
 
 (defn- insert-datom
   [^Store store ^Datom d ^FastList txs ^FastList ft-ds ^FastList vi-ds
-   ^FastList em-ds ^FastList id-ds ^HashMap giants embedding-plan]
+   ^FastList em-ds ^FastList em-jobs ^FastList id-ds ^HashMap giants
+   embedding-plan]
   (let [schema (schema store)
         opts   (opts store)
         attr   (.-a d)
@@ -1576,8 +1583,14 @@
       (let [doc-ref     (if giant? [:g max-gt] [e aid v])
             domain-vecs (some-> ^IdentityHashMap embedding-plan (.get d))]
         (doseq [domain (embedding-attr-domains attr props)]
-          (when-let [vec-data (some-> ^HashMap domain-vecs (.get domain))]
-            (.add em-ds [domain [:a [doc-ref vec-data]]])))))
+          (if (async-embedding-domain? store domain)
+            (.add em-jobs {:type :embedding
+                           :domain domain
+                           :op :add
+                           :ref doc-ref
+                           :value v})
+            (when-let [vec-data (some-> ^HashMap domain-vecs (.get domain))]
+              (.add em-ds [domain [:a [doc-ref vec-data]]]))))))
     (when (identical? vt :db.type/idoc)
       (let [domain (or (props :db/domain) (u/keyword->string attr))]
         (let [op    (if giant?
@@ -1593,7 +1606,7 @@
 
 (defn- delete-datom
   [^Store store ^Datom d ^FastList txs ^FastList ft-ds ^FastList vi-ds
-   ^FastList em-ds ^FastList id-ds ^HashMap giants]
+   ^FastList em-ds ^FastList em-jobs ^FastList id-ds ^HashMap giants]
   (let [schema (schema store)
         e      (.-e d)
         attr   (.-a d)
@@ -1622,7 +1635,13 @@
     (when (props :db/embedding)
       (let [doc-ref (if gt [:g gt] [e aid v])]
         (doseq [domain (embedding-attr-domains attr props)]
-          (.add em-ds [domain [:d doc-ref]]))))
+          (if (async-embedding-domain? store domain)
+            (.add em-jobs {:type :embedding
+                           :domain domain
+                           :op :delete
+                           :ref doc-ref
+                           :value v})
+            (.add em-ds [domain [:d doc-ref]])))))
     (when (identical? vt :db.type/idoc)
       (let [domain (or (props :db/domain) (u/keyword->string attr))]
         (.add id-ds [domain
@@ -1655,21 +1674,31 @@
          vi-ds  (FastList.)
          ;; embedding [:a [doc-ref vec]], [:d doc-ref]
          em-ds  (FastList.)
+         ;; durable async secondary index jobs
+         em-jobs (FastList.)
          ;; idoc [:a d [e aid v]], [:d d [e aid v]], [:g d [gt v]],
          ;; or [:r d [gt v]]
          id-ds  (FastList.)
          giants (HashMap.)]
      (doseq [datom datoms]
        (if (d/datom-added datom)
-         (insert-datom store datom txs ft-ds vi-ds em-ds id-ds giants
+         (insert-datom store datom txs ft-ds vi-ds em-ds em-jobs id-ds giants
                        embedding-plan)
-         (delete-datom store datom txs ft-ds vi-ds em-ds id-ds giants)))
-     (.add txs (lmdb/kv-tx :put c/meta :max-tx
-                           (.advance-max-tx store) :attr :long))
-     (.add txs (lmdb/kv-tx :put c/meta :last-modified
-                           (long (or last-modified-ms
-                                     (System/currentTimeMillis)))
-                           :attr :long))
+         (delete-datom store datom txs ft-ds vi-ds em-ds em-jobs id-ds
+                       giants)))
+     (let [tx-id (long (.advance-max-tx store))
+           modified-ms (long (or last-modified-ms
+                                 (System/currentTimeMillis)))]
+       (doseq [[ordinal job] (map-indexed vector em-jobs)]
+         (.add txs (si/job-tx (assoc job
+                                     :tx tx-id
+                                     :ordinal ordinal
+                                     :created-ms modified-ms
+                                     :updated-ms modified-ms))))
+       (.add txs (lmdb/kv-tx :put c/meta :max-tx tx-id :attr :long))
+       (.add txs (lmdb/kv-tx :put c/meta :last-modified
+                              modified-ms
+                              :attr :long)))
      (doseq [tx extra-kv-txs]
        (.add txs tx))
      {:txs txs
@@ -1993,7 +2022,8 @@
   (open-dbi lmdb c/ha-client-ops)
   (open-dbi lmdb c/meta {:key-size c/+max-key-size+})
   (open-dbi lmdb c/opts {:key-size c/+max-key-size+})
-  (open-dbi lmdb c/schema {:key-size c/+max-key-size+}))
+  (open-dbi lmdb c/schema {:key-size c/+max-key-size+})
+  (open-dbi lmdb c/secondary-index-jobs {:key-size c/+max-key-size+}))
 
 (defn- default-search-domain
   [dms search-opts search-domains]

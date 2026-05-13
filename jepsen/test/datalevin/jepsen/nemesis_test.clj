@@ -57,3 +57,17 @@
       (is (= "still down"
              (get-in result [:errors "n2" :message])))
       (is (pos? (get @attempts "n2" 0))))))
+
+(deftest clock-skew-final-phase-stabilizes-leader-test
+  (testing "clock skew cleanup waits for write admission to recover"
+    (is (= [{:type :info :f :clear-clock-skew}
+            {:type :info :f :stabilize-leader}]
+           (vec (#'nemesis/final-phase-ops
+                 {:clock-skew? true})))))
+  (testing "clock skew plus failover keeps the existing restart step"
+    (is (= [{:type :info :f :clear-clock-skew}
+            {:type :info :f :restart-node}
+            {:type :info :f :stabilize-leader}]
+           (vec (#'nemesis/final-phase-ops
+                 {:clock-skew? true
+                  :failover? true}))))))

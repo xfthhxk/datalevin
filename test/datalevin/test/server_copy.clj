@@ -19,6 +19,8 @@
   ([values]
    (fake-kv-store values nil))
   ([values sync-calls]
+   (fake-kv-store values sync-calls nil))
+  ([values sync-calls watermarks]
    (reify i/ILMDB
      (closed-kv? [_] false)
      (env-opts [_] (:env-opts values))
@@ -38,7 +40,11 @@
      (get-value [_ dbi-name k _k-type _v-type]
        (get values [dbi-name k]))
      (get-value [_ dbi-name k _k-type _v-type _ignore-key?]
-       (get values [dbi-name k])))))
+       (get values [dbi-name k]))
+
+     i/ITxLog
+     (txlog-watermarks [_]
+       (or watermarks {:wal? false})))))
 
 (deftest copy-response-meta-uses-copied-store-payload-lsn-test
   (let [copied-store
@@ -59,6 +65,27 @@
                :db-identity
                :snapshot-last-applied-lsn
                :payload-last-applied-lsn]))))))
+
+(deftest copy-response-meta-uses-txlog-watermark-as-payload-floor-test
+  (let [copied-store
+        (fake-kv-store {[c/kv-info c/wal-snapshot-current-lsn] 15
+                        [c/kv-info c/wal-local-payload-lsn]    15
+                        [c/opts :db-identity]                  "copied-id"}
+                       nil
+                       {:wal? true
+                        :last-applied-lsn 23})]
+    (is (= {:db-name                   "db"
+            :db-identity               "copied-id"
+            :snapshot-last-applied-lsn 15
+            :payload-last-applied-lsn  23
+            :txlog-last-applied-lsn    23}
+           (select-keys
+            (scopy/copy-response-meta "db" copied-store {})
+            [:db-name
+             :db-identity
+             :snapshot-last-applied-lsn
+             :payload-last-applied-lsn
+             :txlog-last-applied-lsn])))))
 
 (deftest sync-copy-response-store-syncs-copied-lmdb-test
   (let [sync-calls (atom [])

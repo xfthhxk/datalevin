@@ -157,6 +157,14 @@
     (instance? ILMDB store) store
     :else nil))
 
+(defn- copy-response-watermark-lsn
+  [kv-store]
+  (when kv-store
+    (try
+      (some-> (kv/txlog-watermarks kv-store) :last-applied-lsn long)
+      (catch Exception _
+        nil))))
+
 (defn copy-response-meta
   [db-name store base-meta]
   (let [store-opts (when (instance? IStore store)
@@ -191,6 +199,13 @@
                       0))
             (catch Exception _
               0)))
+        watermark-lsn (copy-response-watermark-lsn kv-store)
+        materialized-lsn (when (or (some? snapshot-lsn)
+                                   (some? payload-lsn)
+                                   (some? watermark-lsn))
+                           (long (max (long (or snapshot-lsn 0))
+                                      (long (or payload-lsn 0))
+                                      (long (or watermark-lsn 0)))))
         db-identity (or (:db-identity store-opts)
                         (:db-identity kv-opts)
                         stored-db-identity)]
@@ -201,8 +216,11 @@
       (some? snapshot-lsn)
       (assoc :snapshot-last-applied-lsn (long snapshot-lsn))
 
-      (some? payload-lsn)
-      (assoc :payload-last-applied-lsn (long payload-lsn)))))
+      (some? materialized-lsn)
+      (assoc :payload-last-applied-lsn (long materialized-lsn))
+
+      (some? watermark-lsn)
+      (assoc :txlog-last-applied-lsn (long watermark-lsn)))))
 
 (defn sync-copy-response-store!
   [store]
