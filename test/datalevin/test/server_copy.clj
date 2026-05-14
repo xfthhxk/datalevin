@@ -66,7 +66,7 @@
                :snapshot-last-applied-lsn
                :payload-last-applied-lsn]))))))
 
-(deftest copy-response-meta-uses-txlog-watermark-as-payload-floor-test
+(deftest copy-response-meta-reports-txlog-watermark-separately-test
   (let [copied-store
         (fake-kv-store {[c/kv-info c/wal-snapshot-current-lsn] 15
                         [c/kv-info c/wal-local-payload-lsn]    15
@@ -77,7 +77,7 @@
     (is (= {:db-name                   "db"
             :db-identity               "copied-id"
             :snapshot-last-applied-lsn 15
-            :payload-last-applied-lsn  23
+            :payload-last-applied-lsn  15
             :txlog-last-applied-lsn    23}
            (select-keys
             (scopy/copy-response-meta "db" copied-store {})

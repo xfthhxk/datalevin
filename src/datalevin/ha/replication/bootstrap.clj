@@ -98,9 +98,9 @@
           (throw e))))))
 
 (defn- inspect-ha-local-bootstrap-tail
-  ([m snapshot-lsn]
-   (inspect-ha-local-bootstrap-tail m snapshot-lsn nil))
-  ([m snapshot-lsn trusted-max-lsn]
+  ([m materialized-lsn]
+   (inspect-ha-local-bootstrap-tail m materialized-lsn nil))
+  ([m materialized-lsn trusted-max-lsn]
    (if-let [kv-store (store/local-kv-store m)]
      (let [persisted-floor-lsn
            (store/read-ha-local-persisted-lsn kv-store)
@@ -108,8 +108,10 @@
            (store/read-ha-snapshot-payload-lsn m)
            watermark-lsn
            (store/read-ha-local-watermark-lsn m)
+           materialized-floor-lsn
+           (long-max2 materialized-lsn payload-lsn)
            candidate-floor-lsn-raw
-           (long-max4 snapshot-lsn
+           (long-max4 materialized-floor-lsn
                       persisted-floor-lsn
                       watermark-lsn
                       payload-lsn)
@@ -121,22 +123,23 @@
            records
            (ha-local-contiguous-txlog-tail
             kv-store
-            (unchecked-inc (long snapshot-lsn))
+            (unchecked-inc (long materialized-floor-lsn))
             candidate-floor-lsn)
            tail-last-lsn
            (long (or (some-> (peek records) :lsn long)
-                     snapshot-lsn))
+                     materialized-floor-lsn))
            tail-complete?
            (>= tail-last-lsn candidate-floor-lsn)
            verified-materialized-lsn
-           (long-max4 snapshot-lsn
-                      payload-lsn
+           (long-max4 materialized-floor-lsn
                       tail-last-lsn
+                      payload-lsn
                       0)
            verified-floor-lsn
            (long (long-min2 candidate-floor-lsn
-                            verified-materialized-lsn))]
+                             verified-materialized-lsn))]
        {:verified-floor-lsn verified-floor-lsn
+        :materialized-floor-lsn materialized-floor-lsn
         :persisted-floor-lsn persisted-floor-lsn
         :payload-lsn payload-lsn
         :watermark-lsn watermark-lsn
@@ -145,13 +148,15 @@
         :trusted-max-lsn (some-> trusted-max-lsn long)
         :tail-last-lsn tail-last-lsn
         :tail-complete? tail-complete?
-        :tail-record-count (count records)})
-     {:verified-floor-lsn (long snapshot-lsn)
-      :persisted-floor-lsn (long snapshot-lsn)
-      :candidate-floor-lsn-raw (long snapshot-lsn)
-      :candidate-floor-lsn (long snapshot-lsn)
+        :tail-record-count (count records)
+        :tail-records records})
+     {:verified-floor-lsn (long materialized-lsn)
+      :materialized-floor-lsn (long materialized-lsn)
+      :persisted-floor-lsn (long materialized-lsn)
+      :candidate-floor-lsn-raw (long materialized-lsn)
+      :candidate-floor-lsn (long materialized-lsn)
       :trusted-max-lsn (some-> trusted-max-lsn long)
-      :tail-last-lsn (long snapshot-lsn)
+      :tail-last-lsn (long materialized-lsn)
       :tail-complete? true
       :tail-record-count 0})))
 
@@ -166,13 +171,45 @@
                    :data))
   (long applied-lsn))
 
+(defn- summarize-bootstrap-replay
+  [replay]
+  (dissoc replay :tail-records))
+
 (defn reconcile-ha-installed-snapshot-state
-  ([m snapshot-lsn]
-   (reconcile-ha-installed-snapshot-state m snapshot-lsn nil))
-  ([m snapshot-lsn trusted-max-lsn]
-   (let [{:keys [verified-floor-lsn] :as replay}
+  ([m materialized-lsn]
+   (reconcile-ha-installed-snapshot-state m materialized-lsn nil nil))
+  ([m materialized-lsn trusted-max-lsn]
+   (reconcile-ha-installed-snapshot-state m materialized-lsn trusted-max-lsn nil))
+  ([m materialized-lsn trusted-max-lsn apply-record-fn]
+   (let [{:keys [materialized-floor-lsn
+                 verified-floor-lsn
+                 tail-records] :as replay}
          (binding [store/*ha-current-state-fn* (fn [] nil)]
-           (inspect-ha-local-bootstrap-tail m snapshot-lsn trusted-max-lsn))
+           (inspect-ha-local-bootstrap-tail m materialized-lsn trusted-max-lsn))
+         tail-records-to-apply
+         (when (and (fn? apply-record-fn)
+                    (> (long verified-floor-lsn)
+                       (long materialized-floor-lsn)))
+           (filterv (fn [record]
+                      (let [lsn (long (:lsn record))]
+                        (and (> lsn (long materialized-floor-lsn))
+                             (<= lsn (long verified-floor-lsn)))))
+                    tail-records))
+         replayed-last-term
+         (when (seq tail-records-to-apply)
+           (some-> (peek tail-records-to-apply)
+                   :ha-term
+                   long))
+         m (if (seq tail-records-to-apply)
+             (let [next-m (reduce apply-record-fn m tail-records-to-apply)]
+               (cond-> (assoc next-m
+                               :ha-local-last-applied-lsn
+                               (long verified-floor-lsn)
+                               :ha-follower-next-lsn
+                               (unchecked-inc (long verified-floor-lsn)))
+                 replayed-last-term
+                 (assoc :ha-follower-last-applied-term replayed-last-term)))
+             m)
          reopen-info (store/ha-local-store-reopen-info m)
          clamped? (< (long verified-floor-lsn)
                      (long (:candidate-floor-lsn replay)))
@@ -185,9 +222,17 @@
                        (store/reopen-ha-local-store-from-info
                         m reopen-info)))
                   m)]
-     (assoc replay
-            :installed-lsn (long verified-floor-lsn)
-            :state next-m))))
+     (cond-> (assoc (summarize-bootstrap-replay replay)
+                    :installed-lsn (long verified-floor-lsn)
+                    :state next-m)
+       replayed-last-term
+       (assoc :replayed-last-term replayed-last-term)))))
+
+(defn- reconcile-installed-snapshot-state
+  [reconcile-fn state materialized-lsn install-target-lsn apply-record-fn]
+  (if (fn? apply-record-fn)
+    (reconcile-fn state materialized-lsn install-target-lsn apply-record-fn)
+    (reconcile-fn state materialized-lsn install-target-lsn)))
 
 (defn ha-snapshot-open-opts
   [m db-name db-identity]
@@ -203,7 +248,8 @@
   (let [snapshot-db-name (:db-name copy-meta)
         snapshot-db-identity (:db-identity copy-meta)
         snapshot-last-lsn (:snapshot-last-applied-lsn copy-meta)
-        payload-last-lsn (:payload-last-applied-lsn copy-meta)]
+        payload-last-lsn (:payload-last-applied-lsn copy-meta)
+        txlog-last-lsn (:txlog-last-applied-lsn copy-meta)]
     (when (not= db-name snapshot-db-name)
       (u/raise "HA snapshot copy DB name mismatch"
                {:error :ha/follower-snapshot-db-name-mismatch
@@ -223,7 +269,8 @@
                 :snapshot-db-identity snapshot-db-identity
                 :source-endpoint source-endpoint}))
     (when-not (or (integer? snapshot-last-lsn)
-                  (integer? payload-last-lsn))
+                  (integer? payload-last-lsn)
+                  (integer? txlog-last-lsn))
       (u/raise "HA snapshot copy is missing payload last applied LSN"
                {:error :ha/follower-snapshot-missing-last-applied-lsn
                 :db-name db-name
@@ -233,8 +280,12 @@
                               (long snapshot-last-lsn))
           payload-last-lsn (when (integer? payload-last-lsn)
                              (long payload-last-lsn))
-          install-last-lsn (long-max2 (or payload-last-lsn 0)
-                                      (or snapshot-last-lsn 0))]
+          txlog-last-lsn (when (integer? txlog-last-lsn)
+                           (long txlog-last-lsn))
+          materialized-last-lsn (long-max2 (or payload-last-lsn 0)
+                                           (or snapshot-last-lsn 0))
+          install-last-lsn (long-max2 materialized-last-lsn
+                                      (or txlog-last-lsn 0))]
       (when (< install-last-lsn (long required-lsn))
         (u/raise "HA snapshot copy payload is older than the required follower floor"
                  {:error :ha/follower-snapshot-too-stale
@@ -242,11 +293,14 @@
                   :required-lsn (long required-lsn)
                   :snapshot-last-applied-lsn snapshot-last-lsn
                   :payload-last-applied-lsn payload-last-lsn
+                  :txlog-last-applied-lsn txlog-last-lsn
                   :source-endpoint source-endpoint}))
       {:db-name db-name
        :db-identity snapshot-db-identity
-       :snapshot-last-applied-lsn (or snapshot-last-lsn install-last-lsn)
-       :payload-last-applied-lsn install-last-lsn})))
+       :snapshot-last-applied-lsn (or snapshot-last-lsn 0)
+       :payload-last-applied-lsn materialized-last-lsn
+       :txlog-last-applied-lsn (or txlog-last-lsn 0)
+       :install-last-applied-lsn install-last-lsn})))
 
 (defn install-ha-local-snapshot!
   [m snapshot-dir]
@@ -358,6 +412,7 @@
            reconcile-ha-installed-snapshot-state
            persist-ha-local-applied-lsn!
            note-ha-bootstrap-installed-state
+           apply-ha-follower-record!
            sync-ha-follower-batch]}
   db-name m lease source-order next-lsn now-ms]
   (let [required-lsn (long (max 0 (dec (long next-lsn))))]
@@ -393,8 +448,24 @@
                                      (long (if-let [kv-store
                                                     (installed-raw-local-kv-store
                                                      installed-state)]
-                                             (read-ha-local-snapshot-current-lsn
+                                            (read-ha-local-snapshot-current-lsn
                                               kv-store)
+                                             0))))
+                          local-payload-lsn
+                          (long (max 0
+                                     (long (if-let [kv-store
+                                                    (installed-raw-local-kv-store
+                                                     installed-state)]
+                                             (try
+                                               (or (i/get-value
+                                                    kv-store
+                                                    c/kv-info
+                                                    c/wal-local-payload-lsn
+                                                    :keyword
+                                                    :data)
+                                                   0)
+                                               (catch Throwable _
+                                                 0))
                                              0))))
                           manifest-snapshot-lsn
                           (long (max 0
@@ -406,32 +477,51 @@
                                      (long (or (:payload-last-applied-lsn
                                                 manifest)
                                                0))))
-                          install-floor-lsn
-                          ;; The snapshot copy manifest is computed from the
-                          ;; copied LMDB image. Reopening that image without
-                          ;; the source node's sidecar WAL files can recover
-                          ;; conservative local markers, so use the validated
-                          ;; manifest floor as the bootstrap floor.
+                          manifest-txlog-lsn
+                          (long (max 0
+                                     (long (or (:txlog-last-applied-lsn
+                                                manifest)
+                                               0))))
+                          manifest-install-lsn
+                          (long (max manifest-snapshot-lsn
+                                     manifest-payload-lsn
+                                     manifest-txlog-lsn
+                                     (long (or (:install-last-applied-lsn
+                                                manifest)
+                                               0))))
+                          materialized-floor-lsn
+                          ;; The copied datalog payload can lag the copied WAL
+                          ;; tail. Only markers read from the installed LMDB
+                          ;; prove what is already queryable locally; manifest
+                          ;; payload markers are validation metadata.
                           (long (max local-snapshot-lsn
-                                     manifest-snapshot-lsn
-                                     manifest-payload-lsn))
-                          {:keys [state installed-lsn] :as replay}
-                          (reconcile-ha-installed-snapshot-state
+                                     local-payload-lsn))
+                          install-target-lsn
+                          (long (max materialized-floor-lsn
+                                     manifest-txlog-lsn))
+                          {:keys [state installed-lsn replayed-last-term]
+                           :as replay}
+                          (reconcile-installed-snapshot-state
+                           reconcile-ha-installed-snapshot-state
                            installed-state
-                           install-floor-lsn
-                           install-floor-lsn)
+                           materialized-floor-lsn
+                           install-target-lsn
+                           apply-ha-follower-record!)
                           persisted-installed-lsn
                           (persist-ha-local-applied-lsn!
                            state
                            installed-lsn)
                           installed-state
-                          (note-ha-bootstrap-installed-state
-                           state
-                           installed-lsn
-                           source-endpoint
-                           install-floor-lsn
-                           now-ms
-                           persisted-installed-lsn)]
+                          (cond-> (note-ha-bootstrap-installed-state
+                                   state
+                                   installed-lsn
+                                   source-endpoint
+                                   installed-lsn
+                                   now-ms
+                                   persisted-installed-lsn)
+                            replayed-last-term
+                            (assoc :ha-follower-last-applied-term
+                                   replayed-last-term))]
                       (if (< (long installed-lsn) (long required-lsn))
                         {:ok? false
                          :state installed-state
@@ -440,9 +530,15 @@
                                  "HA snapshot copy installed below the required follower floor"
                                  :data {:required-lsn (long required-lsn)
                                         :snapshot-last-applied-lsn
-                                        install-floor-lsn
+                                        install-target-lsn
                                         :local-snapshot-last-applied-lsn
                                         local-snapshot-lsn
+                                        :local-payload-last-applied-lsn
+                                        local-payload-lsn
+                                        :materialized-floor-lsn
+                                        materialized-floor-lsn
+                                        :manifest-install-last-applied-lsn
+                                        manifest-install-lsn
                                         :installed-last-applied-lsn installed-lsn
                                         :resume-next-lsn
                                         (unchecked-inc (long installed-lsn))
@@ -460,7 +556,7 @@
                                                 :ha-follower-bootstrap-source-endpoint
                                                 source-endpoint
                                                 :ha-follower-bootstrap-snapshot-last-applied-lsn
-                                                install-floor-lsn))]
+                                                installed-lsn))]
                             {:ok? true
                              :state next-state})
                           (catch Exception e
@@ -472,9 +568,15 @@
                                      :data (merge
                                             (or (ex-data e) {})
                                             {:snapshot-last-applied-lsn
-                                             install-floor-lsn
+                                             install-target-lsn
                                              :local-snapshot-last-applied-lsn
                                              local-snapshot-lsn
+                                             :local-payload-last-applied-lsn
+                                             local-payload-lsn
+                                             :materialized-floor-lsn
+                                             materialized-floor-lsn
+                                             :manifest-install-last-applied-lsn
+                                             manifest-install-lsn
                                              :installed-last-applied-lsn
                                              installed-lsn
                                              :resume-next-lsn

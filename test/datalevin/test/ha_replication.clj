@@ -178,6 +178,42 @@
       (finally
         (u/delete-files dir)))))
 
+(deftest reconcile-bootstrap-tail-replays-contiguous-records-test
+  (let [dir (u/tmp-dir (str "ha-bootstrap-tail-replay-test-"
+                            (UUID/randomUUID)))]
+    (try
+      (let [db (d/open-kv dir {:wal? true})]
+        (try
+          (d/open-dbi db "a")
+          (dotimes [i 10]
+            (is (= :transacted
+                   (d/transact-kv db [[:put "a" i i]]))))
+          ;; The copied LMDB can contain a local WAL tail past the copied
+          ;; payload marker. Bootstrap must replay that tail before publishing
+          ;; the follower floor.
+          (i/transact-kv (kv/raw-lmdb db)
+                         c/kv-info
+                         [[:put c/wal-local-payload-lsn 8]]
+                         :keyword
+                         :data)
+          (let [applied-lsns (atom [])
+                result (#'boot/reconcile-ha-installed-snapshot-state
+                        {:ha-role :follower
+                         :store db}
+                        8
+                        10
+                        (fn [state record]
+                          (swap! applied-lsns conj (long (:lsn record)))
+                          state))]
+            (is (= [9 10] @applied-lsns))
+            (is (= 10 (:installed-lsn result)))
+            (is (= 10 (get-in result [:state :ha-local-last-applied-lsn])))
+            (is (= 11 (get-in result [:state :ha-follower-next-lsn]))))
+          (finally
+            (d/close-kv db))))
+      (finally
+        (u/delete-files dir)))))
+
 (deftest bootstrap-tail-trusts-copied-payload-floor-test
   (let [dir (u/tmp-dir (str "ha-bootstrap-payload-test-" (UUID/randomUUID)))]
     (try
@@ -193,8 +229,8 @@
                         8
                         16)]
             (is (= 16 (:candidate-floor-lsn result)))
-            (is (= 8 (:tail-last-lsn result)))
-            (is (false? (:tail-complete? result)))
+            (is (= 16 (:tail-last-lsn result)))
+            (is (true? (:tail-complete? result)))
             (is (= 16 (:verified-floor-lsn result))))
           (finally
             (d/close-kv db))))
@@ -259,7 +295,17 @@
       (finally
         (u/delete-files dir)))))
 
-(deftest bootstrap-uses-validated-copy-manifest-floor-test
+(deftest replication-reconcile-wrapper-accepts-apply-function-test
+  (let [result (#'drep/reconcile-ha-installed-snapshot-state
+                {:store :s}
+                8
+                10
+                (fn [state _record] state))]
+    (is (= 8 (:installed-lsn result)))
+    (is (= {:store :s} (:state result)))
+    (is (= 10 (:trusted-max-lsn result)))))
+
+(deftest bootstrap-uses-installed-local-floor-not-manifest-materialized-floor-test
   (let [seen-reconcile (atom nil)
         result
         (boot/bootstrap-ha-follower-from-snapshot*
@@ -271,7 +317,8 @@
           :fetch-ha-endpoint-snapshot-copy!
           (fn [_db-name _m _source-endpoint _snapshot-dir]
             {:copy-meta {:snapshot-last-applied-lsn 16
-                         :payload-last-applied-lsn 16}})
+                         :payload-last-applied-lsn 16
+                         :txlog-last-applied-lsn 23}})
           :validate-ha-snapshot-copy!
           (fn [_db-name _m _source-endpoint _snapshot-dir copy-meta _required-lsn]
             copy-meta)
@@ -310,9 +357,74 @@
          9
          1234)]
     (is (true? (:ok? result)))
-    (is (= [16 16] @seen-reconcile))
-    (is (= 17 (get-in result [:state :resume-next-lsn])))
-    (is (= [16 "127.0.0.1:19001" 16 1234 16]
+    (is (= [8 23] @seen-reconcile))
+    (is (= 9 (get-in result [:state :resume-next-lsn])))
+    (is (= [8 "127.0.0.1:19001" 8 1234 8]
+           (get-in result [:state :noted])))))
+
+(deftest bootstrap-preserves-replayed-tail-term-test
+  (let [seen-apply-fn? (atom false)
+        result
+        (boot/bootstrap-ha-follower-from-snapshot*
+         {:normalize-ha-bootstrap-retry-state
+          (fn [candidate-m _fallback-m _reopen-info]
+            candidate-m)
+          :ha-local-store-reopen-info
+          (constantly nil)
+          :fetch-ha-endpoint-snapshot-copy!
+          (fn [_db-name _m _source-endpoint _snapshot-dir]
+            {:copy-meta {:snapshot-last-applied-lsn 8
+                         :payload-last-applied-lsn 8
+                         :txlog-last-applied-lsn 10}})
+          :validate-ha-snapshot-copy!
+          (fn [_db-name _m _source-endpoint _snapshot-dir copy-meta _required-lsn]
+            copy-meta)
+          :install-ha-local-snapshot!
+          (fn [m _snapshot-dir]
+            {:ok? true
+             :state (assoc m :installed? true)})
+          :raw-local-kv-store
+          (constantly ::kv)
+          :read-ha-local-snapshot-current-lsn
+          (constantly 8)
+          :reconcile-ha-installed-snapshot-state
+          (fn [state snapshot-lsn trusted-install-lsn apply-record-fn]
+            (reset! seen-apply-fn? (fn? apply-record-fn))
+            {:state (assoc state
+                           :snapshot-lsn snapshot-lsn
+                           :trusted-install-lsn trusted-install-lsn
+                           :ha-follower-last-applied-term 3)
+             :installed-lsn 10
+             :replayed-last-term 3})
+          :persist-ha-local-applied-lsn!
+          (fn [_state installed-lsn]
+            installed-lsn)
+          :note-ha-bootstrap-installed-state
+          (fn [state installed-lsn source-endpoint snapshot-lsn now-ms
+               persisted-installed-lsn]
+            (assoc state
+                   :ha-follower-last-applied-term nil
+                   :noted [installed-lsn
+                           source-endpoint
+                           snapshot-lsn
+                           now-ms
+                           persisted-installed-lsn]))
+          :apply-ha-follower-record!
+          (fn [state _record] state)
+          :sync-ha-follower-batch
+          (fn [_db-name state _lease next-lsn _now-ms]
+            {:state (assoc state :resume-next-lsn next-lsn)})}
+         "db"
+         {:initial? true}
+         {:leader-endpoint "127.0.0.1:19001"}
+         ["127.0.0.1:19001"]
+         9
+         1234)]
+    (is (true? (:ok? result)))
+    (is (true? @seen-apply-fn?))
+    (is (= 3 (get-in result [:state :ha-follower-last-applied-term])))
+    (is (= 11 (get-in result [:state :resume-next-lsn])))
+    (is (= [10 "127.0.0.1:19001" 10 1234 10]
            (get-in result [:state :noted])))))
 
 (deftest bootstrap-rejects-installed-copy-below-required-floor-test
@@ -327,7 +439,8 @@
           :fetch-ha-endpoint-snapshot-copy!
           (fn [_db-name _m _source-endpoint _snapshot-dir]
             {:copy-meta {:snapshot-last-applied-lsn 16
-                         :payload-last-applied-lsn 16}})
+                         :payload-last-applied-lsn 16
+                         :txlog-last-applied-lsn 16}})
           :validate-ha-snapshot-copy!
           (fn [_db-name _m _source-endpoint _snapshot-dir copy-meta _required-lsn]
             copy-meta)

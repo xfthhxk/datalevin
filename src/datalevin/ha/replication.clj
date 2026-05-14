@@ -280,7 +280,11 @@
   ([m snapshot-lsn trusted-max-lsn]
    (with-store-runtime-bindings
      #(boot/reconcile-ha-installed-snapshot-state
-       m snapshot-lsn trusted-max-lsn))))
+       m snapshot-lsn trusted-max-lsn)))
+  ([m snapshot-lsn trusted-max-lsn apply-record-fn]
+   (with-store-runtime-bindings
+     #(boot/reconcile-ha-installed-snapshot-state
+       m snapshot-lsn trusted-max-lsn apply-record-fn))))
 
 (defn- ha-snapshot-open-opts
   [m db-name db-identity]
@@ -2098,6 +2102,8 @@
        persist-ha-local-applied-lsn!
        :note-ha-bootstrap-installed-state
        note-ha-bootstrap-installed-state
+       :apply-ha-follower-record!
+       apply-ha-follower-txlog-record!
        :sync-ha-follower-batch
        sync-ha-follower-batch}
       db-name m lease source-order next-lsn now-ms)))

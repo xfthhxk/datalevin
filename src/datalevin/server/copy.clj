@@ -201,11 +201,9 @@
               0)))
         watermark-lsn (copy-response-watermark-lsn kv-store)
         materialized-lsn (when (or (some? snapshot-lsn)
-                                   (some? payload-lsn)
-                                   (some? watermark-lsn))
+                                   (some? payload-lsn))
                            (long (max (long (or snapshot-lsn 0))
-                                      (long (or payload-lsn 0))
-                                      (long (or watermark-lsn 0)))))
+                                      (long (or payload-lsn 0)))))
         db-identity (or (:db-identity store-opts)
                         (:db-identity kv-opts)
                         stored-db-identity)]
