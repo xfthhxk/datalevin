@@ -251,6 +251,51 @@ search options for `fulltext` function.
 During search, `:domains` can be added to the option map to specify the
 domains to be searched.
 
+### Indexing Mode
+
+Fulltext indexing is synchronous by default: a transaction updates the source
+datoms and fulltext index before returning. This preserves read-your-writes
+behavior for `fulltext`.
+
+Fulltext domains can opt into asynchronous indexing with
+`:indexing-mode :async`:
+
+```Clojure
+{:search-domains
+ {"text" {:index-position? true
+          :indexing-mode   :async}}}
+```
+
+or through the default search options:
+
+```Clojure
+{:search-opts {:indexing-mode :async}}
+```
+
+In async mode, Datalevin commits the source datoms and a durable secondary index
+job atomically. An in-process worker applies the fulltext index update after the
+commit and after DB open recovery. Queries over async fulltext indexes are
+eventually consistent until the worker catches up. A worker claims a job with a
+lease before applying it; if the process exits or the worker stalls long enough
+for the lease to expire, a later worker run can reclaim the job and retry it.
+
+Async worker lifecycle and retry settings are shared by fulltext, vector, and
+embedding secondary indexes:
+
+```Clojure
+{:async-secondary-index-worker-max-jobs 100
+ :async-secondary-index-worker-lease-ms 300000
+ :async-secondary-index-retry-base-ms   1000
+ :async-secondary-index-retry-max-ms    60000}
+```
+
+Applications that need to observe async index lag can use:
+
+```Clojure
+(d/secondary-index-status conn)
+(d/wait-for-secondary-index conn {:tx tx-id :timeout-ms 5000})
+```
+
 ## Implementation
 
 As mentioned, the search engine is implemented from scratch, see [blog](https://yyhh.org/blog/2021/11/t-wand-beat-lucene-in-less-than-600-lines-of-code/). Instead of

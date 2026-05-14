@@ -61,6 +61,7 @@
    [datalevin.bits Retrieved Indexable]))
 
 (declare with-open-opts close-store-resources! release-shared-local-store!)
+(declare enqueue-secondary-index-work!)
 
 (defonce ^:private shared-local-stores (atom {}))
 
@@ -489,6 +490,7 @@
          load-datoms-with-plan! prepare-embedding-plan
          prepare-datoms-kv-plan
          commit-datoms-kv-plan!
+         ensure-embedding-vector!
          migrate-attr-values transact-opts ->SamplingWork e-sample*
          default-ratio* analyze*)
 
@@ -539,7 +541,7 @@
 
   (opts [_] opts)
 
-  (assoc-opt [_ k v]
+  (assoc-opt [this k v]
     (let [k' (c/canonical-wal-option-key k)
           _  (vld/validate-option-mutation k' v)
           new-opts (-> opts
@@ -550,7 +552,22 @@
         opts
         (do
           (set! opts new-opts)
-          (transact-opts lmdb new-opts)))))
+          (let [res (transact-opts lmdb new-opts)]
+            (case k'
+              :async-secondary-index-worker-max-jobs
+              (enqueue-secondary-index-work! this)
+
+              :async-secondary-index-worker-lease-ms
+              (enqueue-secondary-index-work! this)
+
+              :async-secondary-index-retry-base-ms
+              (enqueue-secondary-index-work! this)
+
+              :async-secondary-index-retry-max-ms
+              (enqueue-secondary-index-work! this)
+
+              :pass)
+            res)))))
 
   (db-name [_] (:db-name opts))
 
@@ -1407,12 +1424,24 @@
             (transact-kv lmdb txs)))))))
 
 (defn- collect-fulltext
-  [^FastList ft-ds attr props v op]
-  (when-not (str/blank? v)
-    (.add ft-ds
-          [(cond-> (or (props :db.fulltext/domains) [c/default-domain])
-             (props :db.fulltext/autoDomain) (conj (u/keyword->string attr)))
-           op])))
+  [^Store store ^FastList ft-ds ^FastList ft-jobs attr props text ref job-op op]
+  (when-not (str/blank? text)
+    (doseq [domain (vec
+                     (distinct
+                       (cond-> (or (seq (props :db.fulltext/domains))
+                                   [c/default-domain])
+                         (props :db.fulltext/autoDomain)
+                         (conj (u/keyword->string attr)))))]
+      (if (si/async-indexing?
+           (or (get-in (opts store) [:search-domains domain])
+               (when (= c/default-domain domain) (:search-opts (opts store)))
+               {}))
+        (.add ft-jobs {:type :fulltext
+                       :domain domain
+                       :op job-op
+                       :ref ref
+                       :value text})
+        (.add ft-ds [[domain] op])))))
 
 (defn- embedding-attr-domains
   [attr props]
@@ -1430,6 +1459,16 @@
   [^Store store domain]
   (si/async-indexing? (embedding-domain-config store domain)))
 
+(defn- vector-domain-config
+  [^Store store domain]
+  (or (get-in (opts store) [:vector-domains domain])
+      (:vector-opts (opts store))
+      {}))
+
+(defn- async-vector-domain?
+  [^Store store domain]
+  (si/async-indexing? (vector-domain-config store domain)))
+
 (defn embedding-provider
   [^Store store domain]
   (or (get-in (opts store) [:embedding-domain-providers domain])
@@ -1438,6 +1477,487 @@
 (defn embedding-index-by-domain
   [^Store store domain]
   ((.-embedding-indices store) domain))
+
+(defn secondary-index-jobs
+  [^Store store]
+  (mapv second
+        (get-range (.-lmdb store)
+                   c/secondary-index-jobs
+                   [:all]
+                   :data
+                   :data)))
+
+(defn- secondary-index-job
+  [^Store store job-id]
+  (get-value (.-lmdb store) c/secondary-index-jobs job-id :data :data))
+
+(defn- max-long-value
+  [a b]
+  (if (some? a)
+    (max (long a) (long b))
+    (long b)))
+
+(defn- min-long-value
+  [a b]
+  (if (some? a)
+    (min (long a) (long b))
+    (long b)))
+
+(defn- latest-updated-job
+  [a b]
+  (if (or (nil? a)
+          (< (long (or (:job/updated-ms a) 0))
+             (long (or (:job/updated-ms b) 0))))
+    b
+    a))
+
+(defn- maybe-update-stat
+  [m k f v]
+  (if (some? v)
+    (update m k f v)
+    m))
+
+(defn- secondary-index-status-init
+  []
+  {:total-count 0
+   :pending-count 0
+   :running-count 0
+   :completed-count 0
+   :failed-count 0})
+
+(defn- add-job-to-secondary-index-status
+  [status job]
+  (let [status (update status :total-count (fnil inc 0))
+        tx (:job/tx job)
+        status (maybe-update-stat status :last-enqueued-tx max-long-value tx)]
+    (case (:job/status job)
+      :pending
+      (-> status
+          (update :pending-count (fnil inc 0))
+          (maybe-update-stat :oldest-pending-ms
+                             min-long-value
+                             (:job/created-ms job)))
+
+      :completed
+      (-> status
+          (update :completed-count (fnil inc 0))
+          (maybe-update-stat :last-completed-tx max-long-value tx))
+
+      :running
+      (-> status
+          (update :running-count (fnil inc 0))
+          (maybe-update-stat :oldest-running-ms
+                             min-long-value
+                             (:job/claimed-ms job))
+          (maybe-update-stat :next-lease-ms
+                             min-long-value
+                             (:job/lease-until-ms job)))
+
+      :failed
+      (-> status
+          (update :failed-count (fnil inc 0))
+          (maybe-update-stat :last-failed-tx max-long-value tx)
+          (maybe-update-stat :next-retry-ms
+                             min-long-value
+                             (:job/next-retry-ms job))
+          (update :latest-failed-job latest-updated-job job))
+
+      status)))
+
+(defn- finalize-secondary-index-status
+  [now-ms status]
+  (let [failed-job (:latest-failed-job status)
+        oldest-ms (:oldest-pending-ms status)
+        oldest-running-ms (:oldest-running-ms status)]
+    (cond-> (dissoc status :latest-failed-job)
+      failed-job
+      (assoc :last-error (:job/last-error failed-job))
+
+      oldest-ms
+      (assoc :oldest-pending-age-ms
+             (max 0 (- (long now-ms) (long oldest-ms))))
+
+      oldest-running-ms
+      (assoc :oldest-running-age-ms
+             (max 0 (- (long now-ms) (long oldest-running-ms)))))))
+
+(defn secondary-index-status
+  [^Store store]
+  (let [jobs (secondary-index-jobs store)
+        now-ms (System/currentTimeMillis)
+        init-status (secondary-index-status-init)
+        counts (reduce add-job-to-secondary-index-status init-status jobs)
+        by-domain (reduce
+                   (fn [acc job]
+                     (let [k [(:job/type job) (:job/domain job)]]
+                       (update acc k
+                               #(add-job-to-secondary-index-status
+                                 (or % init-status)
+                                 job))))
+                   {}
+                   jobs)]
+    (assoc (finalize-secondary-index-status now-ms counts)
+           :by-domain
+           (into {}
+                 (map (fn [[k status]]
+                        [k (finalize-secondary-index-status now-ms status)]))
+                 by-domain))))
+
+(defn- update-secondary-index-job!
+  [^Store store job]
+  (transact-kv (.-lmdb store) [(si/job-tx job)]))
+
+(defn- embedding-job-item
+  [job]
+  {:text (:job/value job)
+   :ref (:job/ref job)
+   :kind :document
+   :domain (:job/domain job)})
+
+(defn- embedding-job-application
+  [^Store store job]
+  (let [domain (:job/domain job)
+        ref (:job/ref job)
+        index (or (embedding-index-by-domain store domain)
+                  (u/raise "Embedding index is not initialized"
+                           {:domain domain
+                            :job job}))]
+    (case (:job/op job)
+      :add
+      (let [provider (or (embedding-provider store domain)
+                         (u/raise "Embedding provider is not initialized"
+                                  {:domain domain
+                                   :job job}))
+            dimensions (get-in (embedding-domain-config store domain)
+                               [:dimensions])
+            vec-data (ensure-embedding-vector!
+                      domain
+                      dimensions
+                      (first (emb/embedding provider
+                                            [(embedding-job-item job)]
+                                            nil)))]
+        (fn []
+          (remove-vec index ref)
+          (add-vec index ref vec-data)))
+
+      :delete
+      (fn []
+        (remove-vec index ref))
+
+      (u/raise "Unsupported embedding secondary index op"
+               {:op (:job/op job)
+                :job job}))))
+
+(defn- vector-job-application
+  [^Store store job]
+  (let [domain (:job/domain job)
+        ref    (:job/ref job)
+        index  (or ((.-vector-indices store) domain)
+                   (u/raise "Vector index is not initialized"
+                            {:domain domain
+                             :job job}))]
+    (case (:job/op job)
+      :add
+      (let [vec-data (:job/value job)]
+        (fn []
+          (remove-vec index ref)
+          (add-vec index ref vec-data)))
+
+      :delete
+      (fn []
+        (remove-vec index ref))
+
+      (u/raise "Unsupported vector secondary index op"
+               {:op (:job/op job)
+                :job job}))))
+
+(defn- remove-fulltext-doc-idempotently!
+  [engine ref]
+  (try
+    (remove-doc engine ref)
+    (catch clojure.lang.ExceptionInfo e
+      (when-not (= "Document does not exist." (ex-message e))
+        (throw e)))))
+
+(defn- fulltext-job-application
+  [^Store store job]
+  (let [domain (:job/domain job)
+        ref    (:job/ref job)
+        engine (or ((.-search-engines store) domain)
+                   (u/raise "Fulltext search engine is not initialized"
+                            {:domain domain
+                             :job job}))]
+    (case (:job/op job)
+      :add
+      (let [doc-text (:job/value job)]
+        (fn []
+          (add-doc engine ref doc-text true)))
+
+      :delete
+      (fn []
+        (remove-fulltext-doc-idempotently! engine ref))
+
+      (u/raise "Unsupported fulltext secondary index op"
+               {:op (:job/op job)
+                :job job}))))
+
+(defn- secondary-index-job-application
+  [^Store store job]
+  (case (:job/type job)
+    :fulltext (fulltext-job-application store job)
+    :vector (vector-job-application store job)
+    :embedding (embedding-job-application store job)
+    (u/raise "Unsupported secondary index job type"
+             {:type (:job/type job)
+              :job job})))
+
+(defn- secondary-index-retry-delay-ms
+  [^Store store job]
+  (let [base-ms (long (get (opts store)
+                           :async-secondary-index-retry-base-ms
+                           c/*async-secondary-index-retry-base-ms*))
+        max-ms  (long (get (opts store)
+                           :async-secondary-index-retry-max-ms
+                           c/*async-secondary-index-retry-max-ms*))
+        attempts (inc (long (or (:job/attempts job) 0)))
+        exp      (min 10 (dec attempts))
+        delay-ms (* base-ms (bit-shift-left 1 exp))]
+    (min max-ms delay-ms)))
+
+(defn- due-failed-secondary-index-job?
+  [now-ms job]
+  (and (si/failed-job? job)
+       (<= (long (or (:job/next-retry-ms job) 0))
+           (long now-ms))))
+
+(defn- expired-secondary-index-job-lease?
+  [now-ms job]
+  (and (si/running-job? job)
+       (<= (long (or (:job/lease-until-ms job) 0))
+           (long now-ms))))
+
+(defn- claimable-secondary-index-job?
+  [now-ms retry-failed? retry-due-only? job]
+  (or (si/pending-job? job)
+      (expired-secondary-index-job-lease? now-ms job)
+      (and retry-failed?
+           (si/failed-job? job)
+           (or (not retry-due-only?)
+               (due-failed-secondary-index-job? now-ms job)))))
+
+(defn- claim-secondary-index-job!
+  [^Store store job owner lease-ms retry-failed? retry-due-only?]
+  (locking (.-write-txn store)
+    (let [now-ms (System/currentTimeMillis)]
+      (when-let [current (secondary-index-job store (:job/id job))]
+        (when (claimable-secondary-index-job? now-ms
+                                              retry-failed?
+                                              retry-due-only?
+                                              current)
+          (let [claimed (si/claimed-job current
+                                        owner
+                                        (+ (long now-ms) (long lease-ms))
+                                        now-ms)]
+            (update-secondary-index-job! store claimed)
+            claimed))))))
+
+(defn- claimed-secondary-index-job?
+  [job owner]
+  (and (si/running-job? job)
+       (= owner (:job/lease-owner job))))
+
+(defn- complete-claimed-secondary-index-job!
+  [^Store store job owner apply-job!]
+  (locking (.-write-txn store)
+    (when-let [current (secondary-index-job store (:job/id job))]
+      (when (claimed-secondary-index-job? current owner)
+        (apply-job!)
+        (update-secondary-index-job! store (si/completed-job current))
+        true))))
+
+(defn- fail-claimed-secondary-index-job!
+  [^Store store job owner error]
+  (locking (.-write-txn store)
+    (when-let [current (secondary-index-job store (:job/id job))]
+      (when (claimed-secondary-index-job? current owner)
+        (update-secondary-index-job!
+         store
+         (si/failed-job current
+                        error
+                        (System/currentTimeMillis)
+                        (secondary-index-retry-delay-ms store current)))
+        true))))
+
+(defn process-secondary-index-jobs!
+  ([^Store store]
+   (process-secondary-index-jobs! store nil))
+  ([^Store store {:keys [max-jobs retry-due-only?]
+                  :or {max-jobs Long/MAX_VALUE}
+                  :as opts}]
+   (let [now-ms (System/currentTimeMillis)
+         owner (or (:owner opts)
+                   (str (db-name store) "/" (UUID/randomUUID)))
+         lease-ms (long (get (opts store)
+                             :async-secondary-index-worker-lease-ms
+                             c/*async-secondary-index-worker-lease-ms*))
+         retry-failed? (true? (:retry-failed? opts))
+         processable? #(claimable-secondary-index-job? now-ms
+                                                       retry-failed?
+                                                       retry-due-only?
+                                                       %)
+         jobs (take (long max-jobs)
+                    (filter processable? (secondary-index-jobs store)))
+         result (volatile! {:processed-count 0
+                            :claimed-count 0
+                            :completed-count 0
+                            :failed-count 0
+                            :skipped-count 0})
+         inc-result! (fn [k]
+                       (vswap! result update k (fnil u/long-inc 0)))]
+     (doseq [job jobs]
+       (inc-result! :processed-count)
+       (if-let [claimed (claim-secondary-index-job! store
+                                                    job
+                                                    owner
+                                                    lease-ms
+                                                    retry-failed?
+                                                    retry-due-only?)]
+         (do
+           (inc-result! :claimed-count)
+           (try
+             (let [apply-job! (secondary-index-job-application store claimed)]
+               (if (complete-claimed-secondary-index-job! store
+                                                          claimed
+                                                          owner
+                                                          apply-job!)
+                 (inc-result! :completed-count)
+                 (inc-result! :skipped-count)))
+             (catch Throwable e
+               (if (fail-claimed-secondary-index-job! store claimed owner e)
+                 (inc-result! :failed-count)
+                 (inc-result! :skipped-count)))))
+         (inc-result! :skipped-count)))
+     (assoc @result :status (secondary-index-status store)))))
+
+(defn- secondary-index-job-matches?
+  [{:keys [tx type domain]} job]
+  (and (or (nil? tx)
+           (<= (long (:job/tx job)) (long tx)))
+       (or (nil? type)
+           (= type (:job/type job)))
+       (or (nil? domain)
+           (= domain (:job/domain job)))))
+
+(defn- unfinished-secondary-index-jobs
+  [^Store store opts]
+  (filter #(and (secondary-index-job-matches? opts %)
+                (si/unfinished-job? %))
+          (secondary-index-jobs store)))
+
+(defn wait-for-secondary-index
+  ([^Store store]
+   (wait-for-secondary-index store nil))
+  ([^Store store {:keys [tx timeout-ms poll-ms process? max-jobs retry-failed?]
+                  :or {timeout-ms 0
+                       poll-ms 50}
+                  :as opts}]
+   (let [target-tx (long (or tx (max-tx store)))
+         timeout-ms (max 0 (long timeout-ms))
+         poll-ms (max 1 (long poll-ms))
+         deadline-ms (+ (System/currentTimeMillis) timeout-ms)
+         opts (assoc opts :tx target-tx)
+         process-opts {:max-jobs (or max-jobs Long/MAX_VALUE)
+                       :retry-failed? retry-failed?}]
+     (loop []
+       (when process?
+         (process-secondary-index-jobs! store process-opts))
+       (let [unfinished (vec (unfinished-secondary-index-jobs store opts))
+             status (secondary-index-status store)]
+         (if (empty? unfinished)
+           {:caught-up? true
+            :target-tx target-tx
+            :unfinished-count 0
+            :failed-count 0
+            :status status}
+           (let [now-ms (System/currentTimeMillis)
+                 failed-count (count (filter si/failed-job? unfinished))]
+             (if (>= now-ms deadline-ms)
+               {:caught-up? false
+                :target-tx target-tx
+                :unfinished-count (count unfinished)
+                :failed-count failed-count
+                :status status}
+               (do
+                 (Thread/sleep (min poll-ms
+                                    (max 1 (- deadline-ms now-ms))))
+                 (recur))))))))))
+
+(defn- async-secondary-index-worker-opts
+  [^Store store]
+  {:max-jobs (long (get (opts store)
+                        :async-secondary-index-worker-max-jobs
+                        c/*async-secondary-index-worker-max-jobs*))
+   :retry-failed? true
+   :retry-due-only? true})
+
+(defn- wait-for-secondary-index-time!
+  [^Store store target-ms]
+  (loop []
+    (let [remaining-ms (- (long target-ms) (System/currentTimeMillis))]
+      (when (and (pos? remaining-ms) (not (closed? store)))
+        (Thread/sleep (min 1000 remaining-ms))
+        (recur)))))
+
+(deftype SecondaryIndexWork [^Store store exe]
+  IAsyncWork
+  (work-key [_]
+    (->> (db-name store) hash (str "secondary-index") keyword))
+  (do-work [_]
+    (let [^Store store (or (current-shared-local-store (env-dir (.-lmdb store)))
+                           store)]
+      (when (and (a/running? exe)
+                 (not (closed? store)))
+        (try
+          (let [result (process-secondary-index-jobs!
+                        store
+                        (async-secondary-index-worker-opts store))
+                status (:status result)
+                pending? (pos? (long (or (:pending-count status) 0)))
+                next-retry-ms (:next-retry-ms status)
+                next-lease-ms (:next-lease-ms status)]
+            (cond
+              (and pending? (not (closed? store)))
+              (enqueue-secondary-index-work! store)
+
+              (and next-retry-ms (not (closed? store)))
+              (do
+                (wait-for-secondary-index-time! store next-retry-ms)
+                (enqueue-secondary-index-work! store))
+
+              (and next-lease-ms (not (closed? store)))
+              (do
+                (wait-for-secondary-index-time! store next-lease-ms)
+                (enqueue-secondary-index-work! store))))
+          (catch Throwable _)))))
+  (combine [_]
+    (fn [works]
+      (when-let [work (first works)]
+        (a/do-work work))))
+  (callback [_] nil))
+
+(defn enqueue-secondary-index-work!
+  [^Store store]
+  (when-not (closed? store)
+    (let [exe (a/get-executor)]
+      (when (a/running? exe)
+        (a/exec-noresult exe (->SecondaryIndexWork store exe)))))
+  store)
+
+(defn- enqueue-secondary-index-work-if-needed!
+  [^Store store]
+  (when (some si/unfinished-job? (secondary-index-jobs store))
+    (enqueue-secondary-index-work! store))
+  store)
 
 (declare provider-spec-for-domain)
 
@@ -1537,23 +2057,29 @@
   ([^Store store datoms embedding-plan]
    (load-datoms-with-plan! store datoms embedding-plan nil))
   ([^Store store datoms embedding-plan {:keys [extra-kv-txs last-modified-ms]}]
-   (locking (.-write-txn store)
-     (->> (prepare-datoms-kv-plan store
-                                  datoms
-                                  embedding-plan
-                                  extra-kv-txs
-                                  last-modified-ms)
-          (commit-datoms-kv-plan!
-            (.-lmdb store)
-            (.-search-engines store)
-            (.-vector-indices store)
-            (.-embedding-indices store)
-            (.-idoc-indices store))))))
+   (let [[res secondary-index-job-count]
+         (locking (.-write-txn store)
+           (let [plan (prepare-datoms-kv-plan store
+                                              datoms
+                                              embedding-plan
+                                              extra-kv-txs
+                                              last-modified-ms)
+                 res  (commit-datoms-kv-plan!
+                       (.-lmdb store)
+                       (.-search-engines store)
+                       (.-vector-indices store)
+                       (.-embedding-indices store)
+                       (.-idoc-indices store)
+                       plan)]
+             [res (:secondary-index-job-count plan)]))]
+     (when (pos? (long (or secondary-index-job-count 0)))
+       (enqueue-secondary-index-work! store))
+     res)))
 
 (defn- insert-datom
   [^Store store ^Datom d ^FastList txs ^FastList ft-ds ^FastList vi-ds
-   ^FastList em-ds ^FastList em-jobs ^FastList id-ds ^HashMap giants
-   embedding-plan]
+   ^FastList ft-jobs ^FastList vi-jobs ^FastList em-ds ^FastList em-jobs
+   ^FastList id-ds ^HashMap giants embedding-plan]
   (let [schema (schema store)
         opts   (opts store)
         attr   (.-a d)
@@ -1577,8 +2103,17 @@
         (.add txs (lmdb/kv-tx :put c/giants max-gt value
                               :id vtype [:append]))))
     (when (identical? vt :db.type/vec)
-      (.add vi-ds [(conjv (props :db.vec/domains) (v/attr-domain attr))
-                   (if giant? [:g [max-gt v]] [:a [e aid v]])]))
+      (let [ref     (if giant? [:g max-gt] [e aid v])
+            op      (if giant? [:g [max-gt v]] [:a [e aid v]])
+            domains (conjv (props :db.vec/domains) (v/attr-domain attr))]
+        (doseq [domain domains]
+          (if (async-vector-domain? store domain)
+            (.add vi-jobs {:type :vector
+                           :domain domain
+                           :op :add
+                           :ref ref
+                           :value v})
+            (.add vi-ds [[domain] op])))))
     (when (props :db/embedding)
       (let [doc-ref     (if giant? [:g max-gt] [e aid v])
             domain-vecs (some-> ^IdentityHashMap embedding-plan (.get d))]
@@ -1600,13 +2135,22 @@
               op    (if patch (with-meta op {:idoc/patch patch}) op)]
           (.add id-ds [domain op]))))
     (when (props :db/fulltext)
-      (let [v (str v)]
-        (collect-fulltext ft-ds attr props v
-                          (if giant? [:g [max-gt v]] [:a [e aid v]]))))))
+      (let [text (str v)
+            ref  (if giant? [:g max-gt] [e aid text])]
+        (collect-fulltext store
+                          ft-ds
+                          ft-jobs
+                          attr
+                          props
+                          text
+                          ref
+                          :add
+                          (if giant? [:g [max-gt text]] [:a ref]))))))
 
 (defn- delete-datom
   [^Store store ^Datom d ^FastList txs ^FastList ft-ds ^FastList vi-ds
-   ^FastList em-ds ^FastList em-jobs ^FastList id-ds ^HashMap giants]
+   ^FastList ft-jobs ^FastList vi-jobs ^FastList em-ds ^FastList em-jobs
+   ^FastList id-ds ^HashMap giants]
   (let [schema (schema store)
         e      (.-e d)
         attr   (.-a d)
@@ -1630,8 +2174,17 @@
                              0)]
                        (.-g r))))]
     (when (props :db/fulltext)
-      (let [v (str v)]
-        (collect-fulltext ft-ds attr props v (if gt [:r gt] [:d [e aid v]]))))
+      (let [text (str v)
+            ref  (if gt [:g gt] [e aid text])]
+        (collect-fulltext store
+                          ft-ds
+                          ft-jobs
+                          attr
+                          props
+                          text
+                          ref
+                          :delete
+                          (if gt [:r gt] [:d ref]))))
     (when (props :db/embedding)
       (let [doc-ref (if gt [:g gt] [e aid v])]
         (doseq [domain (embedding-attr-domains attr props)]
@@ -1655,8 +2208,17 @@
         (when gt-cur (.remove giants d-eav))
         (.add txs (lmdb/kv-tx :del c/giants gt :id)))
       (when (identical? vt :db.type/vec)
-        (.add vi-ds [(conjv (props :db.vec/domains) (v/attr-domain attr))
-                     (if gt [:r gt] [:d [e aid v]])])))))
+        (let [ref     (if gt [:g gt] [e aid v])
+              op      (if gt [:r gt] [:d [e aid v]])
+              domains (conjv (props :db.vec/domains) (v/attr-domain attr))]
+          (doseq [domain domains]
+            (if (async-vector-domain? store domain)
+              (.add vi-jobs {:type :vector
+                             :domain domain
+                             :op :delete
+                             :ref ref
+                             :value v})
+              (.add vi-ds [[domain] op]))))))))
 
 (defn- prepare-datoms-kv-plan
   "Prepare KV write plan for a datom batch.
@@ -1670,8 +2232,10 @@
          ;; fulltext [:a d [e aid v]], [:d d [e aid v]], [:g d [gt v]],
          ;; or [:r d gt]
          ft-ds  (FastList.)
+         ft-jobs (FastList.)
          ;; vector, same
          vi-ds  (FastList.)
+         vi-jobs (FastList.)
          ;; embedding [:a [doc-ref vec]], [:d doc-ref]
          em-ds  (FastList.)
          ;; durable async secondary index jobs
@@ -1682,14 +2246,15 @@
          giants (HashMap.)]
      (doseq [datom datoms]
        (if (d/datom-added datom)
-         (insert-datom store datom txs ft-ds vi-ds em-ds em-jobs id-ds giants
-                       embedding-plan)
-         (delete-datom store datom txs ft-ds vi-ds em-ds em-jobs id-ds
-                       giants)))
+         (insert-datom store datom txs ft-ds vi-ds ft-jobs vi-jobs em-ds em-jobs
+                       id-ds giants embedding-plan)
+         (delete-datom store datom txs ft-ds vi-ds ft-jobs vi-jobs em-ds
+                       em-jobs id-ds giants)))
      (let [tx-id (long (.advance-max-tx store))
            modified-ms (long (or last-modified-ms
                                  (System/currentTimeMillis)))]
-       (doseq [[ordinal job] (map-indexed vector em-jobs)]
+       (doseq [[ordinal job] (map-indexed vector
+                                          (concat ft-jobs vi-jobs em-jobs))]
          (.add txs (si/job-tx (assoc job
                                      :tx tx-id
                                      :ordinal ordinal
@@ -1705,7 +2270,10 @@
       :ft-ds ft-ds
       :vi-ds vi-ds
       :em-ds em-ds
-      :id-ds id-ds})))
+      :id-ds id-ds
+      :secondary-index-job-count (+ (.size ft-jobs)
+                                    (.size vi-jobs)
+                                    (.size em-jobs))})))
 
 (defn- commit-datoms-kv-plan!
   "Commit a prepared datom KV plan."
@@ -2403,6 +2971,12 @@
                         :auto-entity-time?    false
                         :closed-schema?       false
                         :background-sampling? c/*db-background-sampling?*
+                        :async-secondary-index-worker-max-jobs
+                        c/*async-secondary-index-worker-max-jobs*
+                        :async-secondary-index-retry-base-ms
+                        c/*async-secondary-index-retry-base-ms*
+                        :async-secondary-index-retry-max-ms
+                        c/*async-secondary-index-retry-max-ms*
                         :ha-mode c/*ha-mode*
                         :ha-lease-renew-ms c/*ha-lease-renew-ms*
                         :ha-lease-timeout-ms c/*ha-lease-timeout-ms*
@@ -2469,6 +3043,9 @@
                            (str (UUID/randomUUID)))
            opts3     (assoc opts2 :db-identity db-identity)
            _         (vld/validate-ha-store-opts opts3)
+           _         (vld/validate-secondary-index-worker-options opts3)
+           _         (vld/validate-search-options opts3)
+           _         (vld/validate-vector-options opts3)
            _         (vld/validate-embedding-options opts3)
            _         (when (= "1" (System/getenv "DTLV_DEBUG_STORAGE_OPEN"))
                        (prn :storage-open
@@ -2537,7 +3114,7 @@
                                  (long (get-in @shared-local-stores
                                                [dir-key :refs]
                                                0)))})))
-             wrapper)
+             (enqueue-secondary-index-work-if-needed! wrapper))
            (let [e-providers (init-embedding-providers dir e-domains
                                                        embedding-providers)
                  store (->Store lmdb
@@ -2564,7 +3141,7 @@
                (locking shared-local-stores
                  (swap! shared-local-stores
                         assoc dir-key {:store store :refs 1})))
-             store)))))))
+             (enqueue-secondary-index-work-if-needed! store))))))))
 
 (defn- transfer-engines
   [engines lmdb]

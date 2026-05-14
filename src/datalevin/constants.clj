@@ -686,6 +686,22 @@
   *db-background-sampling?* true)
 
 (def ^{:dynamic true
+       :doc     "Maximum async secondary index jobs processed by each in-process worker run"}
+  *async-secondary-index-worker-max-jobs* 100)
+
+(def ^{:dynamic true
+       :doc     "Lease duration for claimed async secondary index jobs in milliseconds"}
+  *async-secondary-index-worker-lease-ms* 300000)
+
+(def ^{:dynamic true
+       :doc     "Base retry delay for failed async secondary index jobs in milliseconds"}
+  *async-secondary-index-retry-base-ms* 1000)
+
+(def ^{:dynamic true
+       :doc     "Maximum retry delay for failed async secondary index jobs in milliseconds"}
+  *async-secondary-index-retry-max-ms* 60000)
+
+(def ^{:dynamic true
        :doc     "Minimum interval between remote DB freshness checks in `db?`.
 When positive, repeated `db?` calls within this window reuse the previous
 freshness check and skip the remote `last-modified` round trip.

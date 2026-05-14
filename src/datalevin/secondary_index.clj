@@ -29,6 +29,15 @@
 (def pending-status
   :pending)
 
+(def completed-status
+  :completed)
+
+(def failed-status
+  :failed)
+
+(def running-status
+  :running)
+
 (defn normalize-indexing-mode
   [mode]
   (if (nil? mode)
@@ -94,3 +103,65 @@
   [job]
   (let [job (if (:job/id job) job (make-job job))]
     (lmdb/kv-tx :put c/secondary-index-jobs (:job/id job) job :data :data)))
+
+(defn pending-job?
+  [job]
+  (= pending-status (:job/status job)))
+
+(defn failed-job?
+  [job]
+  (= failed-status (:job/status job)))
+
+(defn running-job?
+  [job]
+  (= running-status (:job/status job)))
+
+(defn completed-job?
+  [job]
+  (= completed-status (:job/status job)))
+
+(defn unfinished-job?
+  [job]
+  (not (completed-job? job)))
+
+(defn completed-job
+  ([job]
+   (completed-job job (System/currentTimeMillis)))
+  ([job now-ms]
+   (assoc (dissoc job
+                  :job/lease-owner
+                  :job/lease-until-ms
+                  :job/claimed-ms
+                  :job/next-retry-ms)
+          :job/status completed-status
+          :job/completed-ms (long now-ms)
+          :job/updated-ms (long now-ms)
+          :job/last-error nil)))
+
+(defn claimed-job
+  ([job owner lease-until-ms]
+   (claimed-job job owner lease-until-ms (System/currentTimeMillis)))
+  ([job owner lease-until-ms now-ms]
+   (assoc (dissoc job :job/next-retry-ms)
+          :job/status running-status
+          :job/lease-owner owner
+          :job/lease-until-ms (long lease-until-ms)
+          :job/claimed-ms (long now-ms)
+          :job/updated-ms (long now-ms))))
+
+(defn failed-job
+  ([job error]
+   (failed-job job error (System/currentTimeMillis)))
+  ([job error now-ms]
+   (failed-job job error now-ms nil))
+  ([job error now-ms retry-delay-ms]
+   (assoc (dissoc job
+                  :job/lease-owner
+                  :job/lease-until-ms
+                  :job/claimed-ms)
+          :job/status failed-status
+          :job/attempts (inc (long (or (:job/attempts job) 0)))
+          :job/updated-ms (long now-ms)
+          :job/next-retry-ms (when retry-delay-ms
+                               (+ (long now-ms) (long retry-delay-ms)))
+          :job/last-error (or (ex-message error) (str error)))))

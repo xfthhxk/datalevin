@@ -143,6 +143,10 @@
 
 (def ^:private positive-int-opts
   #{:wal-commit-wait-ms
+    :async-secondary-index-worker-max-jobs
+    :async-secondary-index-worker-lease-ms
+    :async-secondary-index-retry-base-ms
+    :async-secondary-index-retry-max-ms
     :wal-replica-floor-ttl-ms
     :wal-retention-pin-backpressure-threshold-ms
     :wal-commit-marker-version
@@ -937,6 +941,95 @@
                {:error :store/validation
                 :option :embedding-providers
                 :value embedding-providers})))
+  opts)
+
+(defn- validate-search-domain-config*
+  [where domain config]
+  (when-not (map? config)
+    (u/raise "Search domain config must be a map"
+             {:error :store/validation
+              :where where
+              :domain domain
+              :config config}))
+  (when-let [indexing-mode (:indexing-mode config)]
+    (when-not (si/supported-indexing-modes indexing-mode)
+      (u/raise "Search indexing mode is not supported"
+               {:error :store/validation
+                :where where
+                :domain domain
+                :indexing-mode indexing-mode
+                :expected si/supported-indexing-modes}))))
+
+(defn validate-search-options
+  [opts]
+  (when-let [search-opts (:search-opts opts)]
+    (validate-search-domain-config* :search-opts nil search-opts))
+  (when-let [search-domains (:search-domains opts)]
+    (when-not (map? search-domains)
+      (u/raise "Option :search-domains expects a map"
+               {:error :store/validation
+                :option :search-domains
+                :value search-domains}))
+    (doseq [[domain config] search-domains]
+      (when-not (and (string? domain) (not (s/blank? domain)))
+        (u/raise "Search domain names must be non-blank strings"
+                 {:error :store/validation
+                  :option :search-domains
+                  :domain domain}))
+      (validate-search-domain-config* :search-domains domain config)))
+  opts)
+
+(defn- validate-vector-domain-config*
+  [where domain config]
+  (when-not (map? config)
+    (u/raise "Vector domain config must be a map"
+             {:error :store/validation
+              :where where
+              :domain domain
+              :config config}))
+  (when-let [indexing-mode (:indexing-mode config)]
+    (when-not (si/supported-indexing-modes indexing-mode)
+      (u/raise "Vector indexing mode is not supported"
+               {:error :store/validation
+                :where where
+                :domain domain
+                :indexing-mode indexing-mode
+                :expected si/supported-indexing-modes}))))
+
+(defn validate-vector-options
+  [opts]
+  (when-let [vector-opts (:vector-opts opts)]
+    (validate-vector-domain-config* :vector-opts nil vector-opts))
+  (when-let [vector-domains (:vector-domains opts)]
+    (when-not (map? vector-domains)
+      (u/raise "Option :vector-domains expects a map"
+               {:error :store/validation
+                :option :vector-domains
+                :value vector-domains}))
+    (doseq [[domain config] vector-domains]
+      (when-not (and (string? domain) (not (s/blank? domain)))
+        (u/raise "Vector domain names must be non-blank strings"
+                 {:error :store/validation
+                  :option :vector-domains
+                  :domain domain}))
+      (validate-vector-domain-config* :vector-domains domain config)))
+  opts)
+
+(defn validate-secondary-index-worker-options
+  [opts]
+  (doseq [k [:async-secondary-index-worker-max-jobs
+             :async-secondary-index-worker-lease-ms
+             :async-secondary-index-retry-base-ms
+             :async-secondary-index-retry-max-ms]]
+    (when (contains? opts k)
+      (validate-option-mutation k (get opts k))))
+  (let [base-ms (:async-secondary-index-retry-base-ms opts)
+        max-ms (:async-secondary-index-retry-max-ms opts)]
+    (when (and base-ms max-ms (> (long base-ms) (long max-ms)))
+      (u/raise "Option :async-secondary-index-retry-base-ms must be <= :async-secondary-index-retry-max-ms"
+               {:option :async-secondary-index-retry-base-ms
+                :value base-ms
+                :max-retry-ms max-ms})))
   opts)
 
 (defn validate-schema

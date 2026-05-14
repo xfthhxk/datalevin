@@ -938,6 +938,24 @@ Only usable for debug output.
        :doc      "Return the schema of Datalog DB"}
   schema conn/schema)
 
+(def ^{:arglists '([conn])
+       :doc      "Return async secondary index job status for a local Datalog connection."}
+  secondary-index-status conn/secondary-index-status)
+
+(def ^{:arglists '([conn] [conn opts])
+       :doc      "Process pending async secondary index jobs for a local Datalog connection.
+
+  `opts` may include `:max-jobs` to bound the number of jobs processed and
+  `:retry-failed?` to retry failed jobs."}
+  process-secondary-index-jobs! conn/process-secondary-index-jobs!)
+
+(def ^{:arglists '([conn] [conn opts])
+       :doc      "Wait until async secondary index jobs through a target tx are complete.
+
+  `opts` may include `:tx`, `:timeout-ms`, `:poll-ms`, `:type`, `:domain`,
+  `:process?`, `:max-jobs`, and `:retry-failed?`."}
+  wait-for-secondary-index conn/wait-for-secondary-index)
+
 (def ^{:arglists '([conn schema-update]
                    [conn schema-update del-attrs]
                    [conn schema-update del-attrs rename-map])

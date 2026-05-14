@@ -428,6 +428,34 @@ the domains an attribute participate in all have the same vector dimensions.
 During search, `:domains` can be added to the option map to specify the
 domains to be searched.
 
+#### Vector indexing mode
+
+Vector indexing is synchronous by default: a transaction updates the source
+datoms and vector index before returning. This preserves read-your-writes
+behavior for `vec-neighbors`.
+
+Vector domains can opt into asynchronous indexing with `:indexing-mode :async`:
+
+```Clojure
+{:vector-opts {:dimensions    300
+               :metric-type   :cosine
+               :indexing-mode :async}}
+```
+
+or per domain:
+
+```Clojure
+{:vector-domains
+ {"embedding" {:dimensions    300
+               :metric-type   :cosine
+               :indexing-mode :async}}}
+```
+
+In async mode, Datalevin commits the source datoms and a durable secondary index
+job atomically. An in-process worker applies the vector index update after the
+commit and after DB open recovery. Queries over async vector indexes are
+eventually consistent until the worker catches up.
+
 #### Embedding domains and providers
 
 Embedding domains are configured separately from vector domains. Each embedding
@@ -445,6 +473,59 @@ When opening a Datalog store:
 If a configured embedding domain references a provider that is not available at
 runtime, opening the store fails. If a domain has stored dimensions that do not
 match the runtime provider, opening the store also fails.
+
+#### Embedding indexing mode
+
+Embedding indexing is synchronous by default. In sync mode, embedding provider
+calls happen before the transaction returns, so provider failures fail the
+transaction.
+
+Embedding domains can opt into asynchronous indexing with
+`:indexing-mode :async`:
+
+```Clojure
+{:embedding-opts
+ {:provider      :openai-compatible
+  :model         "text-embedding-3-small"
+  :api-key-env   "OPENAI_API_KEY"
+  :metric-type   :cosine
+  :indexing-mode :async}}
+```
+
+or per domain:
+
+```Clojure
+{:embedding-domains
+ {"docs" {:provider      :openai-compatible
+          :model         "text-embedding-3-small"
+          :api-key-env   "OPENAI_API_KEY"
+          :metric-type   :cosine
+          :indexing-mode :async}}}
+```
+
+In async mode, transactions do not call the embedding provider. Datalevin stores
+the source text datoms and a durable secondary index job in the same commit, and
+the in-process worker calls the provider later. Failed jobs are retried with
+bounded exponential backoff. A worker claims a job with a lease before applying
+it; if the process exits or the worker stalls long enough for the lease to
+expire, a later worker run can reclaim the job and retry it.
+
+Async worker lifecycle and retry settings are shared by vector, embedding, and
+fulltext secondary indexes:
+
+```Clojure
+{:async-secondary-index-worker-max-jobs 100
+ :async-secondary-index-worker-lease-ms 300000
+ :async-secondary-index-retry-base-ms   1000
+ :async-secondary-index-retry-max-ms    60000}
+```
+
+Applications that need to observe async index lag can use:
+
+```Clojure
+(d/secondary-index-status conn)
+(d/wait-for-secondary-index conn {:tx tx-id :timeout-ms 5000})
+```
 
 ## References
 

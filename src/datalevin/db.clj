@@ -836,6 +836,8 @@
                    (if info (:last-modified info) (last-modified store))
                    (when info (:max-tx info)))
      (start-sampling store)
+     (when (instance? Store store)
+       (s/enqueue-secondary-index-work! ^Store store))
      db)))
 
 (defn transfer
@@ -898,6 +900,35 @@
     (swap! dbs dissoc (db-name store))
     (close store)
     nil))
+
+(defn- local-store
+  [^DB db op]
+  (let [store (.-store db)]
+    (if (instance? Store store)
+      store
+      (u/raise "Secondary index job APIs require a local Datalog store"
+               {:op op
+                :store (some-> store class str)}))))
+
+(defn secondary-index-status
+  [^DB db]
+  (s/secondary-index-status (local-store db :secondary-index-status)))
+
+(defn process-secondary-index-jobs!
+  ([^DB db]
+   (process-secondary-index-jobs! db nil))
+  ([^DB db opts]
+   (s/process-secondary-index-jobs!
+    (local-store db :process-secondary-index-jobs!)
+    opts)))
+
+(defn wait-for-secondary-index
+  ([^DB db]
+   (wait-for-secondary-index db nil))
+  ([^DB db opts]
+   (s/wait-for-secondary-index
+    (local-store db :wait-for-secondary-index)
+    opts)))
 
 (defn- with-bulk-load-direct-write-path
   [lmdb f]

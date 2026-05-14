@@ -618,6 +618,25 @@
   {:pre [(conn? conn)]}
   (i/schema ^Store (.-store ^DB @conn)))
 
+(defn secondary-index-status
+  [conn]
+  {:pre [(conn? conn)]}
+  (db/secondary-index-status ^DB @conn))
+
+(defn process-secondary-index-jobs!
+  ([conn]
+   (process-secondary-index-jobs! conn nil))
+  ([conn opts]
+   {:pre [(conn? conn)]}
+   (db/process-secondary-index-jobs! ^DB @conn opts)))
+
+(defn wait-for-secondary-index
+  ([conn]
+   (wait-for-secondary-index conn nil))
+  ([conn opts]
+   {:pre [(conn? conn)]}
+   (db/wait-for-secondary-index ^DB @conn opts)))
+
 (defn update-schema
   ([conn schema-update]
    (update-schema conn schema-update nil nil))
