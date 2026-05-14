@@ -111,6 +111,43 @@
           (is (= 21 (:ha-local-last-applied-lsn state)))
           (is (= 22 (:ha-follower-next-lsn state))))))))
 
+(deftest empty-follower-batch-preserves-bootstrap-snapshot-floor-test
+  (let [reported-floor (atom nil)
+        m              {:ha-node-id 2
+                        :ha-local-last-applied-lsn 27
+                        :ha-follower-next-lsn 28
+                        :ha-follower-max-batch-records 8
+                        :ha-follower-last-bootstrap-ms 1000
+                        :ha-follower-bootstrap-source-endpoint
+                        "127.0.0.1:19001"
+                        :ha-follower-bootstrap-snapshot-last-applied-lsn
+                        27}
+        lease          {:leader-endpoint "127.0.0.1:19001"
+                        :leader-last-applied-lsn 27}]
+    (with-redefs-fn
+      {#'drep/reopen-ha-local-store-if-needed identity
+       #'drep/fetch-ha-follower-records-with-gap-fallback
+       (fn [_db-name _m _lease _next-lsn _upto-lsn]
+         {:records []
+          :source-endpoint "127.0.0.1:19001"
+          :source-order ["127.0.0.1:19001"]
+          :source-order-dynamic? false
+          :source-last-applied-lsn-known? true
+          :source-last-applied-lsn 27})
+       #'drep/read-ha-local-last-applied-lsn
+       (constantly 21)
+       #'drep/report-ha-replica-floor!
+       (fn [_db-name _m leader-endpoint applied-lsn]
+         (reset! reported-floor [leader-endpoint applied-lsn]))
+       #'drep/refresh-ha-local-dt-db identity}
+      (fn []
+        (let [{:keys [applied-lsn state]}
+              (#'drep/sync-ha-follower-batch "db" m lease 28 1250)]
+          (is (= ["127.0.0.1:19001" 27] @reported-floor))
+          (is (= 27 applied-lsn))
+          (is (= 27 (:ha-local-last-applied-lsn state)))
+          (is (= 28 (:ha-follower-next-lsn state))))))))
+
 (deftest bootstrap-tail-clamps-to-contiguous-materialized-prefix-test
   (let [dir (u/tmp-dir (str "ha-bootstrap-tail-test-" (UUID/randomUUID)))]
     (try
