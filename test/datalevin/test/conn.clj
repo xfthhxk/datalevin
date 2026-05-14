@@ -681,6 +681,104 @@
       (finally
         (u/delete-files dir)))))
 
+(deftest test-wal-after-append-hook-runs-after-local-commit
+  (let [dir  (u/tmp-dir (str "wal-after-append-hook-test-"
+                             (UUID/randomUUID)))
+        opts {:wal? true
+              :wal-commit-marker? true
+              :snapshot-bootstrap-force? false
+              :wal-durability-profile :strict}
+        seen (atom nil)]
+    (try
+      (let [db (d/open-kv dir opts)]
+        (try
+          (d/open-dbi db "a")
+          (binding [kv/*after-txlog-append-fn*
+                    (fn [{:keys [txlog-lsn] :as ctx}]
+                      (reset! seen
+                              {:ctx ctx
+                               :value (d/get-value db "a" :k)
+                               :watermarks (kv/txlog-watermarks db)
+                               :txlog-lsn txlog-lsn}))]
+            (is (= :transacted
+                   (d/transact-kv db [[:put "a" :k :v]]))))
+          (is (= :v (:value @seen)))
+          (is (= 1 (long (:txlog-lsn @seen))))
+          (is (= 1
+                 (long (get-in @seen [:watermarks :last-applied-lsn]))))
+          (finally
+            (d/close-kv db))))
+      (finally
+        (u/delete-files dir)))))
+
+(deftest test-wal-after-append-hook-runs-for-explicit-transaction-close
+  (let [dir  (u/tmp-dir (str "wal-after-append-explicit-test-"
+                             (UUID/randomUUID)))
+        opts {:wal? true
+              :wal-commit-marker? true
+              :snapshot-bootstrap-force? false
+              :wal-durability-profile :strict}
+        seen (atom nil)]
+    (try
+      (let [db (d/open-kv dir opts)]
+        (try
+          (d/open-dbi db "a")
+          (let [wdb (i/open-transact-kv db)]
+            (is (= :transacted
+                   (d/transact-kv wdb [[:put "a" :k :v]])))
+            (binding [kv/*after-txlog-append-fn*
+                      (fn [{:keys [txlog-lsn] :as ctx}]
+                        (reset! seen
+                                {:ctx ctx
+                                 :value (d/get-value db "a" :k)
+                                 :watermarks (kv/txlog-watermarks db)
+                                 :txlog-lsn txlog-lsn}))]
+              (is (= :committed
+                     (i/close-transact-kv db)))))
+          (is (= :v (:value @seen)))
+          (is (= 1 (long (:txlog-lsn @seen))))
+          (is (= 1
+                 (long (get-in @seen [:watermarks :last-applied-lsn]))))
+          (finally
+            (d/close-kv db))))
+      (finally
+        (u/delete-files dir)))))
+
+(deftest test-wal-after-append-hook-failure-is-post-commit
+  (let [dir  (u/tmp-dir (str "wal-after-append-hook-failure-test-"
+                             (UUID/randomUUID)))
+        opts {:wal? true
+              :wal-commit-marker? true
+              :snapshot-bootstrap-force? false
+              :wal-durability-profile :strict}]
+    (try
+      (let [db (d/open-kv dir opts)]
+        (try
+          (d/open-dbi db "a")
+          (is (thrown-with-msg?
+               Exception
+               #"forced publish failure"
+               (binding [kv/*after-txlog-append-fn*
+                         (fn [_]
+                           (throw (ex-info "forced publish failure"
+                                           {:type ::forced-publish-failure})))]
+                 (d/transact-kv db [[:put "a" :k :v]]))))
+          (is (= :v
+                 (d/get-value db "a" :k)))
+          (is (= 1
+                 (long (:last-applied-lsn (kv/txlog-watermarks db)))))
+          (is (= :transacted
+                 (d/transact-kv db [[:put "a" :k2 :v2]])))
+          (is (= [:v :v2]
+                 [(d/get-value db "a" :k)
+                  (d/get-value db "a" :k2)]))
+          (is (= [1 2]
+                 (mapv :lsn (kv/open-tx-log db 1))))
+          (finally
+            (d/close-kv db))))
+      (finally
+        (u/delete-files dir)))))
+
 (deftest test-wal-open-failure-still-allows-reopen
   (let [dir                    (u/tmp-dir (str "wal-process-lock-failure-test-"
                                                (UUID/randomUUID)))

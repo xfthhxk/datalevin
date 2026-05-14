@@ -287,6 +287,19 @@
                 :lease lease
                 :version current-version}}
 
+      (< (long (or leader-last-applied-lsn 0))
+         (long (or (:leader-last-applied-lsn lease) 0)))
+      {:state state
+       :result {:ok? false
+                :reason :leader-last-applied-lsn-regressed
+                :authority-now-ms authority-now-ms
+                :lease lease
+                :version current-version
+                :leader-last-applied-lsn
+                (long (or leader-last-applied-lsn 0))
+                :authority-leader-last-applied-lsn
+                (long (or (:leader-last-applied-lsn lease) 0))}}
+
       :else
       (let [observed    (or observed-lease lease)
             new-term    (lease/next-term observed)

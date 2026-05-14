@@ -2787,16 +2787,14 @@
           (if (pos? (.size ^java.util.List pending))
             ;; HA commit admission cannot safely reject after we append durable
             ;; txn-log payload, because followers may replay the payload even if
-            ;; the local LMDB commit is later aborted. Run the hook before the
-            ;; append and suppress the lower-level duplicate invocation.
+            ;; the local LMDB commit is later aborted. Run that check before the
+            ;; append and suppress the lower-level duplicate invocation. The
+            ;; post-append publish hook runs only after LMDB close commits below,
+            ;; so authority watermarks never advertise uncommitted local state.
             (let [_ (when-let [f cpp/*before-write-commit-fn*]
                       (f {:operation :close-transact-kv}))
                   append-res (txlog/append-durable!
                               state pending txlog-append-hooks)
-                  _ (run-after-txlog-append!
-                     {:operation :close-transact-kv
-                      :txlog-lsn (long (:lsn append-res))
-                      :append-res append-res})
                   state (refresh-runtime-marker-revision! lmdb state)
                   marker-entry (txlog/next-commit-marker-entry
                                 (:commit-marker? state)
@@ -2805,20 +2803,28 @@
                   commit-rows (append-payload-lsn-row nil (:lsn append-res))
                   _ (when marker-entry
                       (.add ^FastList commit-rows (:row marker-entry)))]
-              (try
-                (when (pos? (.size ^FastList commit-rows))
-                  (apply-lmdb-after-txlog-append! lmdb state commit-rows))
-                (let [status (binding [cpp/*before-write-commit-fn* nil]
-                               (i/close-transact-kv lmdb))]
-                  (when (= status :committed)
-                    (txlog/commit-finished! state marker-entry)
-                    (txlog/note-commit-applied! state append-res))
-                  (when-not (write-txn-open? lmdb)
-                    (txlog-reset-pending! info-v))
-                  status)
-                (catch Exception e
-                  (txlog-mark-fatal! state e)
-                  (throw e))))
+              (let [status
+                    (try
+                      (when (pos? (.size ^FastList commit-rows))
+                        (apply-lmdb-after-txlog-append! lmdb state
+                                                        commit-rows))
+                      (let [status (binding [cpp/*before-write-commit-fn* nil]
+                                     (i/close-transact-kv lmdb))]
+                        (when (= status :committed)
+                          (txlog/commit-finished! state marker-entry)
+                          (txlog/note-commit-applied! state append-res))
+                        (when-not (write-txn-open? lmdb)
+                          (txlog-reset-pending! info-v))
+                        status)
+                      (catch Exception e
+                        (txlog-mark-fatal! state e)
+                        (throw e)))]
+                (when (= status :committed)
+                  (run-after-txlog-append!
+                   {:operation :close-transact-kv
+                    :txlog-lsn (long (:lsn append-res))
+                    :append-res append-res}))
+                status))
             (let [status (i/close-transact-kv lmdb)]
               (when-not (write-txn-open? lmdb)
                 (txlog-reset-pending! info-v))

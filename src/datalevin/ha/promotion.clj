@@ -182,16 +182,15 @@
                        local-last-applied-lsn)
          effective-lsn
          (cond
-           (and lease-expired?
-                reachable?
-                (< leader-lsn authority-lsn))
-           (hu/long-max2 leader-lsn max-local-member-lsn)
-
            reachable?
            (hu/long-max3 authority-lsn leader-lsn max-local-member-lsn)
 
            :else
-           max-local-member-lsn)]
+           ;; The authority LSN is advanced only after write commit
+           ;; confirmation, so endpoint watermarks must not lower it. A
+           ;; restarted former leader can briefly report a stale local
+           ;; watermark while the lease still records acknowledged writes.
+           (hu/long-max2 authority-lsn max-local-member-lsn))]
      {:effective-lease (assoc observed-lease
                               :leader-last-applied-lsn effective-lsn)
       :local-last-applied-lsn local-last-applied-lsn

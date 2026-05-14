@@ -35,6 +35,36 @@
            (get-in state
                    [:leases db-identity :lease :leader-last-applied-lsn])))))
 
+(deftest acquire-transition-rejects-leader-last-applied-lsn-regression-test
+  (let [db-identity "ha-control-acquire-regression"
+        old-lease (lease/new-lease-record
+                   {:db-identity db-identity
+                    :leader-node-id 1
+                    :leader-endpoint "127.0.0.1:19033"
+                    :term 7
+                    :lease-renew-ms 1000
+                    :lease-timeout-ms 5000
+                    :now-ms 1000
+                    :leader-last-applied-lsn 11})
+        state {:leases {db-identity {:lease old-lease
+                                     :version 3}}}
+        request {:db-identity db-identity
+                 :leader-node-id 2
+                 :leader-endpoint "127.0.0.1:19034"
+                 :lease-renew-ms 1000
+                 :lease-timeout-ms 5000
+                 :leader-last-applied-lsn 10
+                 :observed-version 3
+                 :observed-lease old-lease
+                 :now-ms 7000}
+        {:keys [result state]}
+        (#'ctrl/apply-try-acquire-transition state request 7000 1000)]
+    (is (false? (:ok? result)))
+    (is (= :leader-last-applied-lsn-regressed (:reason result)))
+    (is (= 11
+           (get-in state
+                   [:leases db-identity :lease :leader-last-applied-lsn])))))
+
 (deftest write-admission-rejects-stale-clock-skew-check-test
   (with-redefs [ha/ha-now-ms (constantly 5000)
                 ha/ha-now-nanos (constantly 5000000)]
