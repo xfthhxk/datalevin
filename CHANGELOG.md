@@ -39,6 +39,11 @@
 - [Datalog] For embedding-enabled datoms, `embedding-neighbors` built-in
   function returns `[e, a, v]` based on vector similarity. Details in
   [doc](doc/vector.md).
+- [Datalog] Fulltext, vector, and embedding secondary indexes can opt into
+  asynchronous indexing with `:indexing-mode :async`. Async jobs are durably
+  committed with the source transaction, processed by the in-process worker, and
+  retried with bounded backoff and worker leases so stalled jobs can be
+  reclaimed. Details in [doc](doc/search.md) and [doc](doc/vector.md).
 - [Search] `:display :refs+scores` to show relevance score.
 - [Async] A semaphore to limit the number of async jobs in backlog. Will
   block if the backlog is full (max of 4098 and 1024 * cores).
