@@ -1970,13 +1970,26 @@
           ;; Empty batches do not advance the follower's materialized local
           ;; state. Keep the next fetch anchored to the applied floor so a
           ;; speculative cursor cannot skip missing rows forever.
+          ;; Snapshot installs publish a validated floor before the resume
+          ;; fetch; do not let a conservative reopened store marker lower it.
+          bootstrap-floor-lsn
+          (long (if (and (integer? (:ha-follower-last-bootstrap-ms next-m))
+                         (string? (:ha-follower-bootstrap-source-endpoint
+                                   next-m))
+                         (integer?
+                          (:ha-follower-bootstrap-snapshot-last-applied-lsn
+                           next-m)))
+                  (:ha-follower-bootstrap-snapshot-last-applied-lsn next-m)
+                  0))
           current-local-floor-lsn
           (long (max 0
                      (if (seq records)
                        (long (or (:ha-local-last-applied-lsn next-m)
                                  (:ha-local-last-applied-lsn m)
                                  0))
-                       (long (read-ha-local-last-applied-lsn next-m)))))
+                       (long-max2
+                        bootstrap-floor-lsn
+                        (long (read-ha-local-last-applied-lsn next-m))))))
           applied-lsn (long (or last-record-lsn
                                 current-local-floor-lsn))
           next-fetch-lsn
