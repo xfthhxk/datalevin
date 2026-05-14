@@ -1,5 +1,6 @@
 (ns datalevin.jepsen.workload.util
   (:require
+   [clojure.string :as str]
    [datalevin.jepsen.local :as local]
    [jepsen.checker :as checker]))
 
@@ -142,6 +143,59 @@
                   :error error)
      (some? detail)
      (assoc :value detail))))
+
+(def ^:private retryable-leader-failure-markers
+  ["HA write admission rejected"
+   "Timed out waiting for durable LSN"
+   "Timed out waiting for single leader"
+   "Timeout in making request"
+   "Unable to connect to server:"
+   "Connection refused"])
+
+(def ^:private leader-conn-retry-sleep-ms 250)
+
+(def ^:dynamic *with-leader-conn* local/with-leader-conn)
+
+(defn retryable-leader-conn-error?
+  [e]
+  (let [err-data (or (:err-data (ex-data e))
+                     (ex-data e))
+        message  (ex-message e)]
+    (boolean
+      (or (local/transport-failure? e)
+          (true? (:retryable? err-data))
+          (= :txlog/commit-timeout (:type err-data))
+          (= :ha/write-rejected (:error err-data))
+          (and (string? message)
+               (some #(str/includes? message %)
+                     retryable-leader-failure-markers))))))
+
+(defn with-retrying-leader-conn
+  ([test schema timeout-ms f]
+   (with-retrying-leader-conn
+     test
+     schema
+     timeout-ms
+     leader-conn-retry-sleep-ms
+     f))
+  ([test schema timeout-ms retry-sleep-ms f]
+   (let [deadline (+ (System/currentTimeMillis) (long timeout-ms))]
+     (loop []
+       (let [result (try
+                      {:ok? true
+                       :value (*with-leader-conn* test schema f)}
+                      (catch Throwable e
+                        {:ok? false
+                         :error e}))]
+         (if (:ok? result)
+           (:value result)
+           (let [e (:error result)]
+             (if (and (< (System/currentTimeMillis) deadline)
+                      (retryable-leader-conn-error? e))
+               (do
+                 (Thread/sleep (long retry-sleep-ms))
+                 (recur))
+               (throw e)))))))))
 
 (defn tx-report-db
   [conn report]

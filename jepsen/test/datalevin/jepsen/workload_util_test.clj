@@ -7,6 +7,7 @@
    [datalevin.jepsen.workload.internal :as internal]
    [datalevin.jepsen.workload.tx-fn-register :as tx-fn-register]
    [datalevin.jepsen.workload.util :as workload.util]
+   [datalevin.jepsen.local :as local]
    [jepsen.checker :as checker]
    [jepsen.history :as history]))
 
@@ -46,6 +47,43 @@
     (is (= "boom" (:message detail)))
     (is (= (str opaque) (:opaque detail)))
     (is (= [1 (str opaque)] (get-in detail [:nested :values])))))
+
+(deftest retryable-leader-conn-error-classifies-ha-disruption-test
+  (with-redefs [local/transport-failure? (constantly false)]
+    (is (true?
+          (workload.util/retryable-leader-conn-error?
+            (ex-info "Request to Datalevin server failed: \"HA write admission rejected\""
+                     {:error :ha/write-rejected
+                      :retryable? true}))))
+    (is (true?
+          (workload.util/retryable-leader-conn-error?
+            (ex-info "Request to Datalevin server failed: \"Timed out waiting for durable LSN\""
+                     {:err-data {:type :txlog/commit-timeout
+                                 :lsn 22
+                                 :timeout-ms 5000}}))))
+    (is (false?
+          (workload.util/retryable-leader-conn-error?
+            (ex-info "definite setup failure" {:error :bad-setup}))))))
+
+(deftest with-retrying-leader-conn-retries-transient-ha-error-test
+  (let [attempts (atom 0)]
+    (with-redefs [local/transport-failure? (constantly false)]
+      (binding [workload.util/*with-leader-conn*
+                (fn [_test _schema f]
+                  (if (= 1 (swap! attempts inc))
+                    (throw (ex-info
+                             "Request to Datalevin server failed: \"Timed out waiting for durable LSN\""
+                             {:err-data {:type :txlog/commit-timeout}}))
+                    (f ::conn)))]
+        (is (= [:ok ::conn]
+               (workload.util/with-retrying-leader-conn
+                 {:db-name "retry-test"}
+                 {}
+                 1000
+                 0
+                 (fn [conn]
+                   [:ok conn]))))
+        (is (= 2 @attempts))))))
 
 (deftest history-safe-bounds-unbounded-collections-test
   (let [result (workload.util/history-safe {:values (range)})

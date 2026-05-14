@@ -284,9 +284,11 @@
     (when-not (contains? @initialized-clusters cluster-id)
       (locking initialized-clusters
         (when-not (contains? @initialized-clusters cluster-id)
-          (local/with-leader-conn
+          (workload.util/with-retrying-leader-conn
             test
             schema
+            (local/workload-setup-timeout-ms cluster-id
+                                             default-setup-timeout-ms)
             (fn [conn]
               (ensure-tx-fns! conn)
               (ensure-registers! conn key-count payload-bytes)))

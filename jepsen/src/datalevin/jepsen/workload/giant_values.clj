@@ -177,9 +177,11 @@
     (when-not (contains? @initialized-clusters cluster-id)
       (locking initialized-clusters
         (when-not (contains? @initialized-clusters cluster-id)
-          (local/with-leader-conn
+          (workload.util/with-retrying-leader-conn
             test
             schema
+            (local/workload-setup-timeout-ms cluster-id
+                                             default-setup-timeout-ms)
             (fn [conn]
               (ensure-giants! conn key-count payload-bytes)))
           (wait-for-giants-visible-on-live-nodes!

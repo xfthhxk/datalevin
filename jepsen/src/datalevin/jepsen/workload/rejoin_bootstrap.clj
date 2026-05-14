@@ -1,6 +1,5 @@
 (ns datalevin.jepsen.workload.rejoin-bootstrap
   (:require
-   [clojure.string :as str]
    [datalevin.core :as d]
    [datalevin.jepsen.init-cache :as init-cache]
    [datalevin.jepsen.local :as local]
@@ -23,7 +22,6 @@
 (def ^:private wal-gap-writes-per-batch 4)
 (def ^:private wal-gap-segment-max-ms 100)
 (def ^:private wal-gap-replica-floor-ttl-ms 500)
-(def ^:private leader-conn-retry-sleep-ms 250)
 (def ^:private sample-limit 10)
 (defonce ^:private initialized-clusters (init-cache/cluster-cache))
 (defonce ^:private converged-clusters (atom {}))
@@ -38,14 +36,6 @@
     :where
     [?e :register/key ?key]
     [?e :register/value ?value]])
-(def ^:private retryable-leader-failure-markers
-  ["HA write admission rejected"
-   "Timed out waiting for single leader"
-   "Timeout in making request"
-   "Unable to connect to server:"
-   "Connection refused"])
-
-(declare with-retrying-leader-conn)
 
 (defn- node-diagnostics
   [cluster-id logical-node]
@@ -192,7 +182,7 @@
     (when-not (contains? @initialized-clusters cluster-id)
       (locking initialized-clusters
         (when-not (contains? @initialized-clusters cluster-id)
-          (with-retrying-leader-conn
+          (workload.util/with-retrying-leader-conn
             test
             schema
             (local/workload-setup-timeout-ms cluster-id
@@ -201,38 +191,6 @@
               (ensure-registers! conn key-count)))
           (wait-for-registers-visible-on-live-nodes! test key-count)
           (swap! initialized-clusters conj cluster-id))))))
-
-(defn- retryable-leader-conn-error?
-  [e]
-  (let [err-data (or (:err-data (ex-data e))
-                     (ex-data e))
-        message  (ex-message e)]
-    (or (local/transport-failure? e)
-        (true? (:retryable? err-data))
-        (= :ha/write-rejected (:error err-data))
-        (and (string? message)
-             (some #(str/includes? message %)
-                   retryable-leader-failure-markers)))))
-
-(defn- with-retrying-leader-conn
-  [test schema timeout-ms f]
-  (let [deadline (+ (System/currentTimeMillis) (long timeout-ms))]
-    (loop []
-      (let [result (try
-                     {:ok? true
-                      :value (local/with-leader-conn test schema f)}
-                     (catch Throwable e
-                       {:ok? false
-                        :error e}))]
-        (if (:ok? result)
-          (:value result)
-          (let [e (:error result)]
-            (if (and (< (System/currentTimeMillis) deadline)
-                     (retryable-leader-conn-error? e))
-              (do
-                (Thread/sleep (long leader-conn-retry-sleep-ms))
-                (recur))
-              (throw e))))))))
 
 (defn- keyed-value
   [op]
@@ -263,7 +221,7 @@
 
 (defn- leader-register-values
   [test key-count]
-  (with-retrying-leader-conn
+  (workload.util/with-retrying-leader-conn
     test
     schema
     converge-timeout-ms
@@ -274,7 +232,7 @@
 
 (defn- write-register-batch-with-rolls!
   [test key-count start-value n sleep-ms timeout-ms]
-  (with-retrying-leader-conn
+  (workload.util/with-retrying-leader-conn
     test
     schema
     timeout-ms
