@@ -27,6 +27,16 @@
                   (ConcurrentHashMap.)
                   dbs)))
 
+(deftest wire-safe-diagnostic-stringifies-opaque-values-test
+  (let [opaque (Object.)
+        result (#'handlers/wire-safe-diagnostic
+                {:ok true
+                 :opaque opaque
+                 :nested [{:x opaque}]})]
+    (is (= true (:ok result)))
+    (is (string? (:opaque result)))
+    (is (string? (get-in result [:nested 0 :x])))))
+
 (deftest runtime-read-access-uses-message-db-name-test
   (let [server         (test-server)
         writer-entered (CountDownLatch. 1)
