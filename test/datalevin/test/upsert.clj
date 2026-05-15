@@ -73,6 +73,32 @@
     (d/close-db db)
     (u/delete-files dir)))
 
+(deftest test-wal-upsert-cardinality-one-retracts-previous-value
+  (let [dir    (u/tmp-dir (str "upsert-wal-cardinality-one-"
+                               (UUID/randomUUID)))
+        schema {:register/key   {:db/valueType :db.type/long
+                                  :db/unique :db.unique/identity}
+                :register/value {:db/valueType :db.type/long}}
+        q      '[:find ?key ?value
+                 :where
+                 [?e :register/key ?key]
+                 [?e :register/value ?value]]]
+    (try
+      (let [conn (d/get-conn dir schema {:wal? true})]
+        (d/transact! conn [{:db/id "r0"
+                            :register/key 0
+                            :register/value 0}])
+        (d/transact! conn [{:register/key 0
+                            :register/value 1}])
+        (d/transact! conn [{:register/key 0
+                            :register/value 1000}])
+        (is (= #{[0 1000]} (d/q q @conn)))
+        (is (= 1000 (:register/value
+                     (d/entity @conn [:register/key 0]))))
+        (d/close conn))
+      (finally
+        (u/delete-files dir)))))
+
 (deftest test-upsert-2
   (let [dir     (u/tmp-dir (str "upsert-2-" (UUID/randomUUID)))
         db      (d/db-with (d/empty-db

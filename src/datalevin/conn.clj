@@ -373,14 +373,48 @@
   (when-let [prepared (db/prepare-blind-local-tx ^DB @conn tx-data)]
     (direct-local-blind-transact! conn prepared tx-meta)))
 
+(declare current-thread-holds-store-write-lock?)
+
+(defn- local-wal-transact-eligible?
+  [conn]
+  (let [db    ^DB @conn
+        store (.-store db)]
+    (and (instance? Store store)
+         (let [lmdb (.-lmdb ^Store store)]
+           (and (true? (:wal? (i/env-opts lmdb)))
+                (not (l/writing? lmdb))
+                (not (current-thread-holds-store-write-lock? store)))))))
+
+(defn- prepared-local-wal-transact!
+  [conn tx-data tx-meta]
+  (locking conn
+    (let [db    ^DB @conn
+          store (.-store db)
+          old   (db/cache-disabled? store)]
+      (db/disable-cache store)
+      (try
+        (let [report (u/repeat-try-catch
+                       c/+in-tx-overflow-times+
+                       l/resized?
+                       (with db tx-data tx-meta true))]
+          (with-transaction [c conn]
+            (assert (active-conn-structural? c))
+            (db/commit-prepared-tx-data! @c (:tx-data report) report))
+          (assoc report :db-after @conn))
+        (finally
+          (when-not old
+            (db/enable-cache (.-store ^DB @conn))))))))
+
 (defn- -transact! [conn tx-data tx-meta]
   (if (local-direct-transact-eligible? conn)
     (or (maybe-direct-local-blind-transact! conn tx-data tx-meta)
         (direct-local-transact! conn tx-data tx-meta))
-    (let [report (with-transaction [c conn]
-                   (assert (active-conn-structural? c))
-                   (with @c tx-data tx-meta))]
-      (assoc report :db-after @conn))))
+    (if (local-wal-transact-eligible? conn)
+      (prepared-local-wal-transact! conn tx-data tx-meta)
+      (let [report (with-transaction [c conn]
+                     (assert (active-conn-structural? c))
+                     (with @c tx-data tx-meta))]
+        (assoc report :db-after @conn)))))
 
 (defn- notify-listeners!
   [conn report]

@@ -36,6 +36,12 @@
     :where
     [?e :register/key ?key]
     [?e :register/value ?value]])
+(def ^:private register-state-query
+  '[:find ?e ?value
+    :in $ ?key
+    :where
+    [?e :register/key ?key]
+    [?e :register/value ?value]])
 
 (defn- node-diagnostics
   [cluster-id logical-node]
@@ -75,9 +81,10 @@
 
 (defn- register-value
   [db k]
-  (some-> (d/entity db [:register/key (long k)])
-          :register/value
-          long))
+  (some->> (d/q register-state-query db (long k))
+           first
+           second
+           long))
 
 (defn- ensure-registers!
   [conn key-count]
@@ -199,24 +206,31 @@
 
 (defn- write-register!
   [conn k v]
-  (d/transact! conn [{:register/key (long k)
-                      :register/value (long v)}])
-  (clojure.lang.MapEntry. k (long v)))
+  (let [k (long k)
+        v (long v)]
+    (if-some [[entid _] (first (d/q register-state-query @conn k))]
+      (d/transact! conn [{:db/id entid
+                          :register/key k
+                          :register/value v}])
+      (d/transact! conn [{:register/key k
+                          :register/value v}]))
+    (clojure.lang.MapEntry. k v)))
 
 (defn- cas-register!
   [conn k [expected new-value]]
   (let [expected  (long expected)
         new-value (long new-value)
-        db        @conn
-        current   (register-value db k)]
-    (if (= current expected)
-      (do
-        (d/transact! conn [[:db/cas
-                            [:register/key (long k)]
-                            :register/value
-                            expected
-                            new-value]])
-        (clojure.lang.MapEntry. k [expected new-value]))
+        k         (long k)]
+    (if-some [[entid current] (first (d/q register-state-query @conn k))]
+      (if (= (long current) expected)
+        (do
+          (d/transact! conn [[:db/cas
+                              entid
+                              :register/value
+                              expected
+                              new-value]])
+          (clojure.lang.MapEntry. k [expected new-value]))
+        ::cas-failed)
       ::cas-failed)))
 
 (defn- leader-register-values
