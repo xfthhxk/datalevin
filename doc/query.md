@@ -301,7 +301,8 @@ current DB value.
 * a registered id keyword when that id is unambiguous in the registry
 
 Query UDF descriptors use `:udf/kind :query-fn`. Predicate UDFs use
-`:udf/kind :predicate`.
+`:udf/kind :predicate`. Descriptor maps support only `:udf/lang`, `:udf/kind`,
+`:udf/id`, and optional scalar `:udf/version`; unsupported keys are rejected.
 
 ```clojure
 (require '[datalevin.core :as d]

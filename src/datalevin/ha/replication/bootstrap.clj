@@ -308,8 +308,9 @@
                              (long payload-last-lsn))
           txlog-last-lsn (when (integer? txlog-last-lsn)
                            (long txlog-last-lsn))
-          materialized-last-lsn (long-max2 (or payload-last-lsn 0)
-                                           (or snapshot-last-lsn 0))
+          ;; The snapshot LSN is a retention marker, not proof that all
+          ;; datalog payload through that LSN is already materialized.
+          materialized-last-lsn (long (or payload-last-lsn 0))
           install-last-lsn (long-max2 materialized-last-lsn
                                       (or txlog-last-lsn 0))]
       (when (< install-last-lsn (long required-lsn))
@@ -524,12 +525,11 @@
                                                 manifest)
                                                0))))
                           materialized-floor-lsn
-                          ;; The copied datalog payload can lag the copied WAL
-                          ;; tail. Only markers read from the installed LMDB
-                          ;; prove what is already queryable locally; manifest
-                          ;; payload markers are validation metadata.
-                          (long (max local-snapshot-lsn
-                                     local-payload-lsn))
+                          ;; The copied WAL tail can be ahead of the copied
+                          ;; datalog payload. Snapshot markers are retention
+                          ;; floors; only the local payload marker proves what
+                          ;; is already queryable.
+                          (long local-payload-lsn)
                           install-target-lsn
                           (long (max materialized-floor-lsn
                                      manifest-txlog-lsn))

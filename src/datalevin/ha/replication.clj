@@ -1346,6 +1346,26 @@
           :leader-safe-lsn leader-safe-lsn
           :watermark watermark})))))
 
+(defn- bootstrap-floor-covers-source-behind?
+  [m source-endpoint next-lsn source-last-applied-lsn]
+  (let [local-last-applied-lsn
+        (long (max 0
+                   (long (or (:ha-local-last-applied-lsn m)
+                             0))))
+        bootstrap-floor-lsn
+        (long (max 0
+                   (long (or (:ha-follower-bootstrap-snapshot-last-applied-lsn
+                              m)
+                             0))))]
+    (and (pos? bootstrap-floor-lsn)
+         (= source-endpoint
+            (:ha-follower-bootstrap-source-endpoint m))
+         (= local-last-applied-lsn bootstrap-floor-lsn)
+         (= (long next-lsn)
+            (unchecked-inc local-last-applied-lsn))
+         (< (long source-last-applied-lsn)
+            local-last-applied-lsn))))
+
 (defn- ^:redef fetch-ha-follower-records-with-gap-fallback
   [db-name m lease next-lsn upto-lsn]
   (let [sources (ha-follower-source-endpoints m lease)
@@ -1414,16 +1434,21 @@
                              (< source-last-applied-lsn
                                 (long (max 0
                                            (dec (long next-lsn))))))
-                        (if (and speculative-cursor?
-                                 (>= source-last-applied-lsn
-                                     local-last-applied-lsn))
-                          ;; The tracked replay cursor got ahead of what the
-                          ;; chosen source can currently prove, but the source
-                          ;; is still caught up through the follower's
-                          ;; authoritative local floor. Treat this as a stale
-                          ;; speculative cursor so the caller clamps back to
-                          ;; `(inc local-last-applied-lsn)` instead of
-                          ;; triggering snapshot bootstrap.
+                        (if (or (bootstrap-floor-covers-source-behind?
+                                 m
+                                 source-endpoint
+                                 next-lsn
+                                 source-last-applied-lsn)
+                                (and speculative-cursor?
+                                     (>= source-last-applied-lsn
+                                         local-last-applied-lsn)))
+                          ;; Either the advisory replay cursor overshot a
+                          ;; source that is caught up to the local floor, or a
+                          ;; just-installed bootstrap snapshot already proves
+                          ;; the local floor while the source watermark is
+                          ;; stale. Return an empty success so the caller
+                          ;; clamps to the materialized local floor instead of
+                          ;; re-entering snapshot bootstrap.
                           {:ok? true
                            :value {:source-endpoint source-endpoint
                                    :records records

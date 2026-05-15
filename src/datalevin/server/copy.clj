@@ -200,10 +200,10 @@
             (catch Exception _
               0)))
         watermark-lsn (copy-response-watermark-lsn kv-store)
-        materialized-lsn (when (or (some? snapshot-lsn)
-                                   (some? payload-lsn))
-                           (long (max (long (or snapshot-lsn 0))
-                                      (long (or payload-lsn 0)))))
+        ;; Snapshot markers are retention floors. Only the payload marker
+        ;; proves how far the copied LMDB is queryable without replay.
+        payload-floor-lsn (when (some? payload-lsn)
+                            (long payload-lsn))
         db-identity (or (:db-identity store-opts)
                         (:db-identity kv-opts)
                         stored-db-identity)]
@@ -214,8 +214,8 @@
       (some? snapshot-lsn)
       (assoc :snapshot-last-applied-lsn (long snapshot-lsn))
 
-      (some? materialized-lsn)
-      (assoc :payload-last-applied-lsn (long materialized-lsn))
+      (some? payload-floor-lsn)
+      (assoc :payload-last-applied-lsn payload-floor-lsn)
 
       (some? watermark-lsn)
       (assoc :txlog-last-applied-lsn (long watermark-lsn)))))

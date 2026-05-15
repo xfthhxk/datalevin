@@ -115,7 +115,10 @@
               (into nippy/*thaw-serializable-allowlist*
                     c/*data-serializable-classes*)
               nippy/*thaw-serializable-allowlist*)]
-    (nippy/fast-thaw bs)))
+    (try
+      (nippy/fast-thaw bs)
+      (catch Exception _
+        (nippy/thaw bs)))))
 
 ;; bitmap
 

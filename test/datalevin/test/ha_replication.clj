@@ -9,14 +9,29 @@
    [datalevin.ha.replication.store :as store]
    [datalevin.interface :as i]
    [datalevin.kv :as kv]
-   [datalevin.util :as u])
-  (:import
-   [datalevin.db DB]
-   [java.util UUID]))
+  [datalevin.storage :as st]
+  [datalevin.util :as u])
+ (:import
+  [datalevin.db DB]
+  [datalevin.storage Store]
+  [java.util UUID]))
 
 (defn- conn-store
   [conn]
   (.-store ^DB @conn))
+
+(defn- fake-info-kv-store
+  [values]
+  (reify i/ILMDB
+    (closed-kv? [_] false)
+    (get-value [_ dbi-name k]
+      (get values [dbi-name k]))
+    (get-value [_ dbi-name k _k-type]
+      (get values [dbi-name k]))
+    (get-value [_ dbi-name k _k-type _v-type]
+      (get values [dbi-name k]))
+    (get-value [_ dbi-name k _k-type _v-type _ignore-key?]
+      (get values [dbi-name k]))))
 
 (deftest next-ha-follower-sync-lsn-clamps-to-local-floor-test
   (is (= 15 (#'drep/next-ha-follower-sync-lsn 15 23)))
@@ -154,6 +169,81 @@
           (is (= 27 (:ha-local-last-applied-lsn state)))
           (is (= 28 (:ha-follower-next-lsn state))))))))
 
+(deftest empty-follower-batch-accepts-fresh-bootstrap-floor-test
+  (let [source-endpoint "127.0.0.1:19001"
+        m               {:ha-node-id 2
+                         :ha-local-last-applied-lsn 18
+                         :ha-follower-next-lsn 19
+                         :ha-follower-last-bootstrap-ms 1000
+                         :ha-follower-bootstrap-source-endpoint
+                         source-endpoint
+                         :ha-follower-bootstrap-snapshot-last-applied-lsn
+                         18}
+        lease           {:leader-endpoint source-endpoint
+                         :leader-last-applied-lsn 17}]
+    (is (true? (#'drep/bootstrap-floor-covers-source-behind?
+                m source-endpoint 19 17)))
+    (is (false? (#'drep/bootstrap-floor-covers-source-behind?
+                 (assoc m :ha-follower-bootstrap-source-endpoint "other")
+                 source-endpoint
+                 19
+                 17)))
+    (with-redefs-fn
+      {#'drep/ha-follower-source-endpoints
+       (fn [_m _lease] [source-endpoint])
+       #'drep/ha-leader-endpoint
+       (fn [_m _lease] source-endpoint)
+       #'drep/fetch-leader-watermark-lsn
+       (fn [& _] {:reachable? true :last-applied-lsn 17})
+       #'drep/fetch-ha-leader-txlog-batch
+       (fn [& _] [])
+       #'drep/ha-source-advertised-last-applied-lsn
+       (fn [& _] {:known? true :last-applied-lsn 17})}
+      (fn []
+        (let [result (#'drep/fetch-ha-follower-records-with-gap-fallback
+                      "db" m lease 19 26)]
+          (is (= [] (:records result)))
+          (is (= source-endpoint (:source-endpoint result)))
+          (is (= [source-endpoint] (:source-order result)))
+          (is (true? (:source-last-applied-lsn-known? result)))
+          (is (= 17 (:source-last-applied-lsn result))))))))
+
+(deftest raw-open-opts-persist-without-consuming-txlog-lsn-test
+  (let [dir (u/tmp-dir (str "ha-raw-open-opts-test-" (UUID/randomUUID)))]
+    (try
+      (let [store (st/open dir nil {:db-name "ha-raw-open"
+                                    :wal? true
+                                    :cache-limit 512})]
+        (try
+          (let [lmdb (.-lmdb ^Store store)
+                before-lsn (long (or (:last-applied-lsn
+                                      (kv/txlog-watermarks lmdb))
+                                     0))]
+            (i/close store)
+            (let [reopened (st/open
+                            dir
+                            nil
+                            {:db-name "ha-raw-open"
+                             :wal? true
+                             :cache-limit 1024
+                             :datalevin.storage/raw-persist-open-opts?
+                             true})]
+              (try
+                (let [reopened-lmdb (.-lmdb ^Store reopened)
+                      after-lsn (long (or (:last-applied-lsn
+                                           (kv/txlog-watermarks
+                                            reopened-lmdb))
+                                          0))]
+                  (is (= before-lsn after-lsn))
+                  (is (= 1024 (:cache-limit (i/opts reopened)))))
+                (finally
+                  (i/close reopened)))))
+          (finally
+            (when-not (i/closed? store)
+              (i/close store)))))
+      (finally
+        (u/delete-files dir)))))
+
 (deftest bootstrap-tail-clamps-to-contiguous-materialized-prefix-test
   (let [dir (u/tmp-dir (str "ha-bootstrap-tail-test-" (UUID/randomUUID)))]
     (try
@@ -271,6 +361,32 @@
       (finally
         (u/delete-files dir)))))
 
+(deftest follower-local-applied-lsn-ignores-snapshot-retention-floor-test
+  (let [dir (u/tmp-dir (str "ha-follower-snapshot-retention-floor-test-"
+                            (UUID/randomUUID)))]
+    (try
+      (let [db (d/open-kv dir {:wal? true})]
+        (try
+          ;; The snapshot marker can advance as a txlog retention floor. It
+          ;; must not make a follower report unapplied datalog rows as local.
+          (i/transact-kv (kv/raw-lmdb db)
+                         c/kv-info
+                         [[:put c/ha-local-applied-lsn 16]
+                          [:put c/wal-snapshot-current-lsn 16]
+                          [:put c/wal-local-payload-lsn 8]]
+                         :keyword
+                         :data)
+          (let [m {:ha-role :follower
+                   :store db
+                   :ha-local-last-applied-lsn 16
+                   :ha-follower-next-lsn 17}]
+            (is (= 8 (store/read-ha-local-last-applied-lsn m)))
+            (is (= 8 (store/ha-local-last-applied-lsn m))))
+          (finally
+            (d/close-kv db))))
+      (finally
+        (u/delete-files dir)))))
+
 (deftest follower-local-applied-lsn-trusts-copied-payload-floor-test
   (let [dir (u/tmp-dir (str "ha-follower-copied-payload-floor-test-"
                             (UUID/randomUUID)))]
@@ -359,6 +475,28 @@
     (is (= {:store :s} (:state result)))
     (is (= 10 (:trusted-max-lsn result)))))
 
+(deftest bootstrap-validation-does-not-use-snapshot-retention-floor-test
+  (let [err (try
+              (boot/validate-ha-snapshot-copy!
+               "db"
+               {:ha-db-identity "identity"}
+               "127.0.0.1:19001"
+               "/unused"
+               {:db-name "db"
+                :db-identity "identity"
+                :snapshot-last-applied-lsn 16
+                :payload-last-applied-lsn 8
+                :txlog-last-applied-lsn 8}
+               12)
+              nil
+              (catch clojure.lang.ExceptionInfo e
+                (ex-data e)))]
+    (is (= :ha/follower-snapshot-too-stale (:error err)))
+    (is (= 12 (:required-lsn err)))
+    (is (= 16 (:snapshot-last-applied-lsn err)))
+    (is (= 8 (:payload-last-applied-lsn err)))
+    (is (= 8 (:txlog-last-applied-lsn err)))))
+
 (deftest bootstrap-snapshot-uses-only-current-leader-source-test
   (let [attempted-sources (atom [])
         noted-source (atom nil)
@@ -383,7 +521,8 @@
             {:ok? true
              :state (assoc m :installed? true)})
           :raw-local-kv-store
-          (constantly ::kv)
+          (constantly (fake-info-kv-store
+                       {[c/kv-info c/wal-local-payload-lsn] 8}))
           :read-ha-local-snapshot-current-lsn
           (constantly 8)
           :reconcile-ha-installed-snapshot-state
@@ -444,7 +583,8 @@
             {:ok? true
              :state m})
           :raw-local-kv-store
-          (constantly ::kv)
+          (constantly (fake-info-kv-store
+                       {[c/kv-info c/wal-local-payload-lsn] 8}))
           :read-ha-local-snapshot-current-lsn
           (constantly 8)
           :reconcile-ha-installed-snapshot-state
@@ -498,7 +638,8 @@
             {:ok? true
              :state (assoc m :installed? true)})
           :raw-local-kv-store
-          (constantly ::kv)
+          (constantly (fake-info-kv-store
+                       {[c/kv-info c/wal-local-payload-lsn] 8}))
           :read-ha-local-snapshot-current-lsn
           (constantly 8)
           :reconcile-ha-installed-snapshot-state
@@ -533,6 +674,64 @@
     (is (= [8 "127.0.0.1:19001" 8 1234 8]
            (get-in result [:state :noted])))))
 
+(deftest bootstrap-uses-local-payload-floor-not-snapshot-retention-floor-test
+  (let [seen-reconcile (atom nil)
+        result
+        (boot/bootstrap-ha-follower-from-snapshot*
+         {:normalize-ha-bootstrap-retry-state
+          (fn [candidate-m _fallback-m _reopen-info]
+            candidate-m)
+          :ha-local-store-reopen-info
+          (constantly nil)
+          :fetch-ha-endpoint-snapshot-copy!
+          (fn [_db-name _m _source-endpoint _snapshot-dir]
+            {:copy-meta {:snapshot-last-applied-lsn 16
+                         :payload-last-applied-lsn 8
+                         :txlog-last-applied-lsn 16}})
+          :validate-ha-snapshot-copy!
+          (fn [_db-name _m _source-endpoint _snapshot-dir copy-meta _required-lsn]
+            copy-meta)
+          :install-ha-local-snapshot!
+          (fn [m _snapshot-dir]
+            {:ok? true
+             :state (assoc m :installed? true)})
+          :raw-local-kv-store
+          (constantly (fake-info-kv-store
+                       {[c/kv-info c/wal-local-payload-lsn] 8}))
+          :read-ha-local-snapshot-current-lsn
+          (constantly 16)
+          :reconcile-ha-installed-snapshot-state
+          (fn [state materialized-lsn trusted-install-lsn]
+            (reset! seen-reconcile [materialized-lsn trusted-install-lsn])
+            {:state state
+             :installed-lsn 16})
+          :persist-ha-local-applied-lsn!
+          (fn [_state installed-lsn]
+            installed-lsn)
+          :note-ha-bootstrap-installed-state
+          (fn [state installed-lsn source-endpoint snapshot-lsn now-ms
+               persisted-installed-lsn]
+            (assoc state
+                   :noted [installed-lsn
+                           source-endpoint
+                           snapshot-lsn
+                           now-ms
+                           persisted-installed-lsn]))
+          :sync-ha-follower-batch
+          (fn [_db-name state _lease next-lsn _now-ms]
+            {:state (assoc state :resume-next-lsn next-lsn)})}
+         "db"
+         {:initial? true}
+         {:leader-endpoint "127.0.0.1:19001"}
+         ["127.0.0.1:19001"]
+         9
+         1234)]
+    (is (true? (:ok? result)))
+    (is (= [8 16] @seen-reconcile))
+    (is (= 17 (get-in result [:state :resume-next-lsn])))
+    (is (= [16 "127.0.0.1:19001" 16 1234 16]
+           (get-in result [:state :noted])))))
+
 (deftest bootstrap-preserves-replayed-tail-term-test
   (let [seen-apply-fn? (atom false)
         result
@@ -555,7 +754,8 @@
             {:ok? true
              :state (assoc m :installed? true)})
           :raw-local-kv-store
-          (constantly ::kv)
+          (constantly (fake-info-kv-store
+                       {[c/kv-info c/wal-local-payload-lsn] 8}))
           :read-ha-local-snapshot-current-lsn
           (constantly 8)
           :reconcile-ha-installed-snapshot-state
@@ -620,7 +820,8 @@
             {:ok? true
              :state (assoc m :installed? true)})
           :raw-local-kv-store
-          (constantly ::kv)
+          (constantly (fake-info-kv-store
+                       {[c/kv-info c/wal-local-payload-lsn] 8}))
           :read-ha-local-snapshot-current-lsn
           (constantly 8)
           :reconcile-ha-installed-snapshot-state

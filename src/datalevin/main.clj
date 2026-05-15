@@ -54,13 +54,14 @@
   Command serv - run as a server.
 
   Optional options:
+         --host        Listening host, default is 127.0.0.1
       -p --port        Listening port, default is 8898
       -r --root        Root data directory, default is /var/lib/datalevin
       -v --verbose     Show detailed logging messages
 
   Examples:
       dtlv -p 8899 -v serv
-      dtlv -r /data/dtlv serv")
+      DATALEVIN_DEFAULT_PASSWORD=secret dtlv --host 0.0.0.0 -r /data/dtlv serv")
 
 (def ^:private stat-help
   "
@@ -246,6 +247,9 @@
    ["-f" "--file PATH" "Path to the specified file"]
    ["-g" "--datalog" "Dump/load as a Datalog database"]
    ["-h" "--help" "Show usage"]
+   [nil "--host HOST" "Server listening host address"
+    :default "127.0.0.1"
+    :validate [#(not (s/blank? %)) "Must be a non-blank host"]]
    ["-i" "--idle-timeout IDLE_TIMEOUT" "Server session idle timeout in ms"
     :default c/default-idle-timeout
     :parse-fn #(Long/parseLong %)
@@ -305,6 +309,7 @@
                 "dump" dump-help
                 "load" load-help
                 "mcp"  mcp-help
+                "serv" serv-help
                 "stat" stat-help
                 (str "Unknown command: " command))))
     (exit 0 (usage summary))))

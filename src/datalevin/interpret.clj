@@ -21,15 +21,14 @@
    [datalevin.util :as u]
    [datalevin.core]
    [datalevin.analyzer]
+   [datalevin.bits]
    [datalevin.stem]
    [datalevin.client]
    [datalevin.constants]
+   [datalevin.lmdb]
    [clojure.string :as s])
   (:import
    [clojure.lang AFn]
-   [datalevin.datom Datom]
-   [org.tartarus.snowball SnowballStemmer]
-   [java.text Normalizer Normalizer$Form]
    [java.io DataInput DataOutput Writer]))
 
 (def ^:no-doc user-facing-ns
@@ -105,7 +104,7 @@
             x))))
     x))
 
-(declare ctx)
+(declare ctx inter-fn-ctx)
 
 (defn ^:no-doc eval-fn [ctx form]
   (sci/eval-form ctx (if (coll? form)
@@ -136,6 +135,248 @@
 
 ;; inter-fn
 
+(def ^:private disallowed-inter-fn-core-symbols
+  '#{agent
+     alias
+     all-ns
+     await
+     await-for
+     bean
+     alter-var-root
+     binding
+     bound-fn
+     bound-fn*
+     create-ns
+     declare
+     def
+     defmacro
+     defmethod
+     defmulti
+     defn
+     defonce
+     defrecord
+     deftype
+     deftype*
+     extend
+     extend-protocol
+     extend-type
+     eval
+     find-ns
+     find-var
+     future
+     future-call
+     get-thread-bindings
+     import
+     import*
+     in-ns
+     intern
+     load
+     load-file
+     load-reader
+     load-string
+     loaded-libs
+     locking
+     macroexpand
+     macroexpand-1
+     memfn
+     ns
+     ns-aliases
+     ns-imports
+     ns-interns
+     ns-map
+     ns-publics
+     ns-refers
+     ns-resolve
+     ns-unalias
+     ns-unmap
+     pcalls
+     pmap
+     promise
+     proxy
+     pvalues
+     push-thread-bindings
+     read
+     read-line
+     read-string
+     refer
+     reify
+     reify*
+     remove-ns
+     require
+     requiring-resolve
+     resolve
+     set!
+     send
+     send-off
+     shutdown-agents
+     slurp
+     spit
+     the-ns
+     use
+     var
+     var-get
+     var-set
+     with-bindings
+     with-bindings*
+     with-open})
+
+(def ^:private disallowed-inter-fn-core-symbol-set
+  (into disallowed-inter-fn-core-symbols
+        (map #(symbol "clojure.core" (name %)))
+        disallowed-inter-fn-core-symbols))
+
+(def ^:private allowed-inter-fn-core-api
+  '#{add
+     cardinality
+     count-datoms
+     datom
+     datom-a
+     datom-e
+     datom-v
+     datom?
+     datoms
+     db?
+     entid
+     entity
+     entity-db
+     explain
+     max-eid
+     pull
+     pull-many
+     q
+     k
+     read-buffer
+     resolve-tempid
+     retract
+     rseek-datoms
+     schema
+     seek-datoms
+     squuid
+     squuid-time-millis
+     tempid
+     touch
+     tx-data->simulated-report
+     v})
+
+(def ^:private allowed-inter-fn-bits-api
+  '#{read-buffer})
+
+(def ^:private allowed-inter-fn-lmdb-api
+  '#{has-next-val
+     k
+     next-val
+     seek-key
+     v
+     val-iterator})
+
+(def ^:private allowed-inter-fn-interpret-api
+  '#{inter-fn})
+
+(def ^:private runtime-inter-fn-interpret-api
+  (conj allowed-inter-fn-interpret-api 'compile-inter-fn-source))
+
+(def ^:private allowed-inter-fn-datalevin-api
+  {"datalevin.bits" allowed-inter-fn-bits-api
+   "datalevin.core" allowed-inter-fn-core-api
+   "datalevin.interpret" allowed-inter-fn-interpret-api
+   "datalevin.lmdb" allowed-inter-fn-lmdb-api})
+
+(def ^:private allowed-inter-fn-datalevin-namespaces
+  #{"datalevin.analyzer"
+    "datalevin.constants"})
+
+(def ^:private allowed-inter-fn-host-symbols
+  '#{Thread/sleep
+     java.lang.Thread/sleep})
+
+(def ^:private allowed-inter-fn-interop-symbols
+  '#{.indexOf
+     .put})
+
+(def ^:private max-inter-fn-sleep-ms 1000)
+
+(declare quote-form?)
+
+(defn- class-like-namespace?
+  [ns-part]
+  (boolean
+   (when ns-part
+     (or (s/starts-with? ns-part "java.")
+         (s/starts-with? ns-part "javax.")
+         (s/starts-with? ns-part "jdk.")
+         (s/starts-with? ns-part "sun.")
+         (s/starts-with? ns-part "com.sun.")
+         (some #(and (seq %)
+                     (Character/isUpperCase ^char (first %)))
+               (s/split ns-part #"\."))))))
+
+(defn- interop-symbol?
+  [sym]
+  (let [n  (name sym)
+        ns (namespace sym)]
+    (or (= "." n)
+        (= "new" n)
+        (s/starts-with? n ".")
+        (s/ends-with? n ".")
+        (class-like-namespace? ns))))
+
+(defn- disallowed-datalevin-symbol?
+  [sym]
+  (when-let [ns (namespace sym)]
+    (when (s/starts-with? ns "datalevin.")
+      (if-let [allowed-api (allowed-inter-fn-datalevin-api ns)]
+        (not (contains? allowed-api (symbol (name sym))))
+        (not (contains? allowed-inter-fn-datalevin-namespaces ns))))))
+
+(defn- quoted-query-dot-syntax?
+  [quoted? sym]
+  (and quoted?
+       (nil? (namespace sym))
+       (#{"." "..."} (name sym))))
+
+(defn- validate-inter-fn-symbol!
+  [quoted? sym]
+  (when (or (contains? disallowed-inter-fn-core-symbol-set sym)
+            (disallowed-datalevin-symbol? sym)
+            (and (not (contains? allowed-inter-fn-host-symbols sym))
+                 (not (contains? allowed-inter-fn-interop-symbols sym))
+                 (not (quoted-query-dot-syntax? quoted? sym))
+                 (interop-symbol? sym)))
+    (u/raise "Disallowed inter-fn symbol " sym
+             {:type   :datalevin/disallowed-inter-fn-symbol
+              :symbol sym})))
+
+(defn- validate-inter-fn-code!
+  ([form]
+   (validate-inter-fn-code! false form))
+  ([quoted? form]
+   (cond
+     (symbol? form)
+     (validate-inter-fn-symbol! quoted? form)
+
+     (seq? form)
+     (if (quote-form? form)
+       (validate-inter-fn-code! true (second form))
+       (doseq [x form]
+         (validate-inter-fn-code! quoted? x)))
+
+     (map? form)
+     (doseq [[k v] form]
+       (validate-inter-fn-code! quoted? k)
+       (validate-inter-fn-code! quoted? v))
+
+     (coll? form)
+     (doseq [x form]
+       (validate-inter-fn-code! quoted? x))
+
+     :else nil)))
+
+(defn- qualify-code
+  [form]
+  (if (quote-form? form)
+    form
+    (w/walk qualify-code qualify-fn form)))
+
 (defn- filter-used
   "Only keep referred locals in the form"
   [locals [args & body]]
@@ -151,7 +392,7 @@
 (defn- save-env
   "Borrowed some pieces from https://github.com/technomancy/serializable-fn"
   [locals form]
-  (let [form        (cons 'fn (w/postwalk qualify-fn (rest form)))
+  (let [form        (cons 'fn (qualify-code (rest form)))
         quoted-form `(quote ~form)]
     (if locals
       `(list `let [~@(for [local   (filter-used locals (rest form)),
@@ -160,6 +401,63 @@
                        let-arg)]
              ~quoted-form)
       quoted-form)))
+
+(defn- quote-form?
+  [x]
+  (and (seq? x)
+       (= 'quote (first x))
+       (= 2 (count x))))
+
+(defn- fn-source-form?
+  [x]
+  (and (seq? x)
+       (#{'fn 'clojure.core/fn} (first x))
+       (or (vector? (second x))
+           (and (symbol? (second x))
+                (vector? (nth x 2 nil))))))
+
+(defn- literal-let-source-form?
+  [x]
+  (and (seq? x)
+       (#{'let 'clojure.core/let} (first x))
+       (= 3 (count x))
+       (let [bindings (second x)]
+         (and (vector? bindings)
+              (even? (count bindings))
+              (every?
+               (fn [[sym value]]
+                 (and (symbol? sym)
+                      (quote-form? value)))
+               (partition 2 bindings))))
+       (fn-source-form? (nth x 2 nil))))
+
+(defn- inter-fn-source-form?
+  [x]
+  (or (fn-source-form? x)
+      (literal-let-source-form? x)))
+
+(defn ^:no-doc validate-inter-fn-source!
+  [src]
+  (when-not (inter-fn-source-form? src)
+    (u/raise "Invalid inter-fn source form"
+             {:type :datalevin/invalid-inter-fn-source
+              :source src}))
+  (validate-inter-fn-code! src)
+  src)
+
+(defn ^:no-doc compile-inter-fn-source
+  "Compile validated inter-fn source with the restricted inter-fn interpreter."
+  [src]
+  (let [src (validate-inter-fn-source! src)]
+    (with-meta
+      (sci/eval-form inter-fn-ctx src)
+      {:type   :datalevin/inter-fn
+       :source src})))
+
+(defn- source->inter-fn
+  "Convert a source form to get an inter-fn"
+  [src]
+  (compile-inter-fn-source src))
 
 (defmacro inter-fn
   "Same signature as `fn`. Create a function that can be serialized in
@@ -172,11 +470,8 @@
   babashka pod. It runs in an interpreter.
 
   Symbols referred in inter-fn needs to be fully-qualified."
-  [args & body]
-  `(with-meta
-     (sci/eval-form ctx (fn ~args (do ~@body)))
-     {:type   :datalevin/inter-fn
-      :source ~(save-env (keys &env) &form)}))
+  [_args & _body]
+  `(compile-inter-fn-source ~(save-env (keys &env) &form)))
 
 (defn inter-fn?
   "Return true if `x` is an `inter-fn`"
@@ -187,14 +482,6 @@
   "Create a named `inter-fn`"
   [fn-name args & body]
   `(def ~fn-name (inter-fn ~args ~@body)))
-
-(defn- source->inter-fn
-  "Convert a source form to get an inter-fn"
-  [src]
-  (with-meta
-    (sci/eval-form ctx src)
-    {:type   :datalevin/inter-fn
-     :source src}))
 
 (nippy/extend-freeze AFn :datalevin/inter-fn
     [^AFn x ^DataOutput out]
@@ -226,4 +513,59 @@
                 'org.tartarus.snowball.SnowballStemmer
                 org.tartarus.snowball.SnowballStemmer}})
 
+(defn- selected-vars-map
+  [ns syms]
+  (available-map ns (select-keys (ns-publics ns) syms) (constantly true)))
+
+(defn- inter-fn-sleep
+  [ms]
+  (let [ms (long ms)]
+    (when-not (<= 0 ms max-inter-fn-sleep-ms)
+      (u/raise "inter-fn Thread/sleep exceeds allowed bound"
+               {:type   :datalevin/inter-fn-sleep-out-of-bounds
+                :ms     ms
+                :max-ms max-inter-fn-sleep-ms}))
+    (Thread/sleep ms)))
+
+(defn- host-vars-map
+  [ns]
+  (let [sci-ns (sci/create-ns ns)]
+    {'sleep (sci/new-var (symbol (name ns) "sleep")
+                         inter-fn-sleep
+                         {:sci.impl/built-in true
+                          :ns sci-ns})}))
+
+(defn- inter-fn-namespaces
+  []
+  {'clojure.core
+   (zipmap disallowed-inter-fn-core-symbols
+           (repeat nil))
+   'datalevin.analyzer
+   (additional-map 'datalevin.analyzer
+                   (ns-publics 'datalevin.analyzer))
+   'datalevin.constants
+   (user-facing-map 'datalevin.constants
+                    (ns-publics 'datalevin.constants))
+   'datalevin.core
+   (selected-vars-map 'datalevin.core allowed-inter-fn-core-api)
+   'datalevin.bits
+   (selected-vars-map 'datalevin.bits allowed-inter-fn-bits-api)
+   'datalevin.lmdb
+   (selected-vars-map 'datalevin.lmdb allowed-inter-fn-lmdb-api)
+   'datalevin.interpret
+   (selected-vars-map 'datalevin.interpret runtime-inter-fn-interpret-api)
+   'Thread
+   (host-vars-map 'Thread)
+   'java.lang.Thread
+   (host-vars-map 'java.lang.Thread)})
+
+(def ^:private inter-fn-classes
+  {'java.util.HashMap java.util.HashMap})
+
+(def ^:no-doc inter-fn-sci-opts
+  {:namespaces (inter-fn-namespaces)
+   :classes    inter-fn-classes})
+
 (def ^:no-doc ctx (sci/init sci-opts))
+
+(def ^:no-doc inter-fn-ctx (sci/init inter-fn-sci-opts))

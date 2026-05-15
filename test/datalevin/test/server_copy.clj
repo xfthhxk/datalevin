@@ -66,6 +66,37 @@
                :snapshot-last-applied-lsn
                :payload-last-applied-lsn]))))))
 
+(deftest copy-response-meta-does-not-promote-snapshot-floor-test
+  (let [copied-store
+        (fake-kv-store {[c/kv-info c/wal-snapshot-current-lsn] 24
+                        [c/kv-info c/wal-local-payload-lsn]    18
+                        [c/opts :db-identity]                  "copied-id"})]
+    (is (= {:db-name                   "db"
+            :db-identity               "copied-id"
+            :snapshot-last-applied-lsn 24
+            :payload-last-applied-lsn  18}
+           (select-keys
+            (scopy/copy-response-meta "db" copied-store {})
+            [:db-name
+             :db-identity
+             :snapshot-last-applied-lsn
+             :payload-last-applied-lsn])))))
+
+(deftest copy-response-meta-does-not-synthesize-payload-from-snapshot-test
+  (let [copied-store
+        (fake-kv-store {[c/kv-info c/wal-snapshot-current-lsn] 24
+                        [c/opts :db-identity]                  "copied-id"})]
+    (is (= {:db-name                   "db"
+            :db-identity               "copied-id"
+            :snapshot-last-applied-lsn 24
+            :payload-last-applied-lsn  0}
+           (select-keys
+            (scopy/copy-response-meta "db" copied-store {})
+            [:db-name
+             :db-identity
+             :snapshot-last-applied-lsn
+             :payload-last-applied-lsn])))))
+
 (deftest copy-response-meta-reports-txlog-watermark-separately-test
   (let [copied-store
         (fake-kv-store {[c/kv-info c/wal-snapshot-current-lsn] 15

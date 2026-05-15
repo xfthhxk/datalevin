@@ -61,7 +61,7 @@
    [datalevin.bits Retrieved Indexable]))
 
 (declare with-open-opts close-store-resources! release-shared-local-store!)
-(declare enqueue-secondary-index-work!)
+(declare enqueue-secondary-index-work! enqueue-secondary-index-work-if-needed!)
 
 (defonce ^:private shared-local-stores (atom {}))
 
@@ -581,8 +581,8 @@
 
         :close
         (do
-          (close-store-resources! this)
-          (set! local-closed? true))))
+          (set! local-closed? true)
+          (close-store-resources! this))))
     nil)
 
   (closed? [_] (or local-closed? (closed-kv? lmdb)))
@@ -1941,8 +1941,7 @@
           (catch Throwable _)))))
   (combine [_]
     (fn [works]
-      (when-let [work (first works)]
-        (a/do-work work))))
+      (peek (vec works))))
   (callback [_] nil))
 
 (defn enqueue-secondary-index-work!
@@ -1953,7 +1952,7 @@
         (a/exec-noresult exe (->SecondaryIndexWork store exe)))))
   store)
 
-(defn- enqueue-secondary-index-work-if-needed!
+(defn ^:no-doc enqueue-secondary-index-work-if-needed!
   [^Store store]
   (when (some si/unfinished-job? (secondary-index-jobs store))
     (enqueue-secondary-index-work! store))
@@ -2482,6 +2481,7 @@
   (-> (persistable-ha-opts opts)
       (dissoc :embedding-providers
               :embedding-domain-providers
+              :runtime-opts
               raw-persist-open-opts-key)))
 
 (defn- persistable-opts
@@ -2491,6 +2491,7 @@
                  persistable-ha-opts
                  (dissoc :embedding-providers
                          :embedding-domain-providers
+                         :runtime-opts
                          raw-persist-open-opts-key))
         opts (cond-> opts
                (contains? opts :embedding-opts)
@@ -2541,7 +2542,7 @@
           (when (and (not (contains? flags :nosync))
                      (not (contains? flags :rdonly)))
             (set-env-flags raw-db #{:nosync} true))))
-      (transact-kv
+      (kv/transact-kv-without-txlog!
         raw-db
         (conj (for [[k v] opts]
                 (lmdb/kv-tx :put c/opts k v :attr :data))

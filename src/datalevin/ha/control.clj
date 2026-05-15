@@ -11,9 +11,9 @@
   "Consensus control-plane lease authority."
   (:require
    [clojure.string :as s]
+   [datalevin.bits :as b]
    [datalevin.ha.lease :as lease]
    [datalevin.util :as u]
-   [taoensso.nippy :as nippy]
    [taoensso.timbre :as log])
   (:import
    [com.alipay.sofa.jraft Closure Iterator Node RaftGroupService Status]
@@ -775,7 +775,7 @@
         state         (normalize-snapshot-state!
                         (merge (blank-state) @state-atom))]
     (u/create-dirs snapshot-root)
-    (u/dump-bytes tmp-path ^bytes (nippy/freeze state))
+    (u/dump-bytes tmp-path ^bytes (b/serialize state))
     (move-replace-existing! tmp-path snapshot-path)
     (when-not (.addFile writer fsm-snapshot-file)
       (u/raise "Failed to add HA control FSM snapshot file"
@@ -795,8 +795,8 @@
                 :files files}))
     (let [snapshot-path (snapshot-state-file snapshot-root)
           state         (-> (Files/readAllBytes
-                             (Paths/get snapshot-path (make-array String 0)))
-                            nippy/thaw
+                            (Paths/get snapshot-path (make-array String 0)))
+                            b/deserialize
                             normalize-snapshot-state!)]
       (reset! state-atom state)
       true)))
@@ -853,11 +853,11 @@
 (defn- freeze->base64
   [x]
   (.encodeToString (Base64/getUrlEncoder)
-                   ^bytes (nippy/freeze x)))
+                   ^bytes (b/serialize x)))
 
 (defn- thaw-from-base64
   [^String s]
-  (nippy/thaw (.decode (Base64/getUrlDecoder) s)))
+  (b/deserialize (.decode (Base64/getUrlDecoder) s)))
 
 (defn- control-message
   [code payload]
@@ -904,7 +904,7 @@
 
 (defn- command->byte-buffer
   [cmd]
-  (ByteBuffer/wrap ^bytes (nippy/freeze cmd)))
+  (ByteBuffer/wrap ^bytes (b/serialize cmd)))
 
 (defn- ^:redef apply-local-command-once!
   [^Node node cmd timeout-ms]
@@ -1420,7 +1420,8 @@
           (let [^ByteBuffer data (.getData iter)
                 done           (.done iter)
                 step           (try
-                                 (let [cmd (nippy/thaw (bytebuffer->bytes data))
+                                 (let [cmd (b/deserialize
+                                            (bytebuffer->bytes data))
                                        {:keys [state result]}
                                        (apply-state-command state cmd)]
                                    {:state state

@@ -47,6 +47,21 @@
 (def ^:private transient-runtime-store-retry-sleep-ms 25)
 (def ^:private client-op-await-timeout-ms 30000)
 (def ^:private client-op-completed-retain-ms 60000)
+(def ^:private privileged-server-option-keys
+  #{:ha-mode
+    :ha-control-plane
+    :ha-members
+    :ha-node-id
+    :ha-client-credentials
+    :ha-fencing-hook
+    :ha-clock-skew-hook
+    :runtime-opts
+    :snapshot-dir
+    :spill-opts
+    :embedding-opts
+    :embedding-domains
+    :embedding-providers
+    :embedding-domain-providers})
 
 (defn- skey-state
   ^clojure.lang.Volatile [^SelectionKey skey]
@@ -79,6 +94,19 @@
       (do
         ((:remove-client deps) server client-id)
         (p/write-message-blocking ch write-bf {:type :reconnect} wire-opts)))))
+
+(defn- privileged-server-option-key?
+  [k]
+  (contains? privileged-server-option-keys (c/canonical-wal-option-key k)))
+
+(defn- with-privileged-server-option-permission!
+  [deps server skey k f]
+  (if (privileged-server-option-key? k)
+    (with-permission!
+      deps server skey control-act server-obj nil
+      "Server control permission is required to configure consensus HA or server-local options"
+      f)
+    (f)))
 
 (defn- sys-conn
   [deps server]
@@ -992,10 +1020,19 @@
     skey
     #(let [db-name (nth args 0)
            store   (dt-store deps server skey db-name writing?)
-           [k v]   (rest args)
-           result  ((:apply-assoc-opt! deps)
-                    server db-name store writing? k v)]
-       (write-result! deps skey result))))
+           [k v]   (rest args)]
+       (db-alter-permission!
+        deps server skey db-name
+        "Don't have permission to alter the database"
+        (fn []
+          (with-privileged-server-option-permission!
+            deps server skey k
+            (fn []
+              (write-result!
+               deps
+               skey
+               ((:apply-assoc-opt! deps)
+                server db-name store writing? k v)))))))))
 
 (defn set-schema
   [deps server skey {:keys [args writing?]}]

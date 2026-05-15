@@ -43,7 +43,7 @@
    [java.nio.file Files Paths OpenOption]
    [java.nio.channels ClosedChannelException Selector SelectionKey
     ServerSocketChannel SocketChannel]
-   [java.net InetSocketAddress]
+   [java.net InetAddress InetSocketAddress]
    [java.security MessageDigest]
    [java.util Iterator UUID Map]
    [java.util.function BiFunction]
@@ -206,6 +206,36 @@
             (throw t)))))))
 
 (def ^:private has-permission? auth/has-permission?)
+
+(def ^:private privileged-server-option-keys
+  #{:ha-mode
+    :ha-control-plane
+    :ha-members
+    :ha-node-id
+    :ha-client-credentials
+    :ha-fencing-hook
+    :ha-clock-skew-hook
+    :runtime-opts
+    :snapshot-dir
+    :spill-opts
+    :embedding-opts
+    :embedding-domains
+    :embedding-providers
+    :embedding-domain-providers})
+
+(defn- privileged-server-options
+  [opts]
+  (not-empty
+   (vec (filter #(contains? (or opts {}) %) privileged-server-option-keys))))
+
+(defn- require-control-for-privileged-server-options!
+  [permissions opts]
+  (when-let [options (privileged-server-options opts)]
+    (when-not (has-permission? ::control ::server nil permissions)
+      (u/raise
+       "Server control permission is required to configure consensus HA or server-local options"
+       {:error :server/privileged-options
+        :options options}))))
 
 (defmacro wrap-permission
   [req-act req-obj req-tgt message & body]
@@ -1026,13 +1056,13 @@
   (scopy/sync-copy-response-store! store))
 
 (defn- open-port
-  [port]
+  [host port]
   (try
     (doto (ServerSocketChannel/open)
-      (.bind (InetSocketAddress. port))
+      (.bind (InetSocketAddress. ^String host (int port)))
       (.configureBlocking false))
     (catch Exception e
-      (u/raise "Error opening port:" (ex-message e) {}))))
+      (u/raise "Error opening port " host ":" port ": " (ex-message e) {}))))
 
 (defn- get-ip [^SelectionKey skey]
   (let [ch ^SocketChannel (.channel skey)]
@@ -1356,17 +1386,19 @@
    {:keys [db-name schema opts return-db-info? respond?]
     :or   {respond? true}} requested-db-type]
   (wrap-error
-    (let [{:keys [client-id]} @(.attachment skey)
-          {:keys [username]}  (get-client server client-id)
-          db-name             (u/lisp-case db-name)
-          existing-db?        (db-exists? server db-name)
-          sys-conn            (.-sys-conn server)]
+    (let [{:keys [client-id]}       @(.attachment skey)
+          {:keys [username
+                  permissions]}     (get-client server client-id)
+          db-name                   (u/lisp-case db-name)
+          existing-db?              (db-exists? server db-name)
+          sys-conn                  (.-sys-conn server)]
       (log/debug "open" db-name "that exist?" existing-db?)
       (wrap-permission
           (if existing-db? ::view ::create)
           ::database
           (when existing-db? (db-eid sys-conn db-name))
           "Don't have permission to open database"
+        (require-control-for-privileged-server-options! permissions opts)
         (locking (db-open-lock server db-name)
           (let [dir              (db-dir (.-root server) db-name)
                 existing-db-now? (db-exists? server db-name)
@@ -1425,12 +1457,40 @@
 
 (defn- session-lmdb [sys-conn] (sess/session-lmdb sys-conn))
 
+(def ^:private default-password-env-var "DATALEVIN_DEFAULT_PASSWORD")
+
+(def ^:private default-bind-host "127.0.0.1")
+
+(defn- ^:redef default-password-env-set?
+  []
+  (some? (System/getenv default-password-env-var)))
+
 (defn get-default-password
   "Return the initial admin password, checking DATALEVIN_DEFAULT_PASSWORD
   environment variable first, falling back to the built-in default."
   []
-  (or (System/getenv "DATALEVIN_DEFAULT_PASSWORD")
+  (or (System/getenv default-password-env-var)
       c/default-password))
+
+(defn- loopback-bind-host?
+  [host]
+  (try
+    (.isLoopbackAddress (InetAddress/getByName host))
+    (catch Exception _
+      false)))
+
+(defn- require-safe-bind-password!
+  [host]
+  (when (and (not (loopback-bind-host? host))
+             (not (default-password-env-set?)))
+    (u/raise "Refusing to bind Datalevin server to non-loopback host "
+             host
+             " with the built-in default password. Set "
+             default-password-env-var
+             " or bind to "
+             default-bind-host
+             "."
+             {:host host})))
 
 (defn- init-sys-db
   [root password]
@@ -1925,17 +1985,19 @@
 
 (defn create
   "Create a Datalevin server. Initially not running, call `start` to run."
-  [{:keys [port root idle-timeout verbose]
+  [{:keys [host port root idle-timeout verbose]
     :as   opts
-    :or   {port         8898
+    :or   {host         default-bind-host
+           port         8898
            root         "/var/lib/datalevin"
            idle-timeout c/default-idle-timeout
            verbose      false}}]
-  {:pre [(int? port) (not (s/blank? root))]}
+  {:pre [(int? port) (not (s/blank? host)) (not (s/blank? root))]}
   (try
     (when (contains? opts :verbose)
       (log/set-min-level! (if verbose :debug :info)))
-    (let [^ServerSocketChannel server-socket (open-port port)
+    (require-safe-bind-password! host)
+    (let [^ServerSocketChannel server-socket (open-port host port)
           ^Selector selector                 (Selector/open)
           running                            (AtomicBoolean. false)
           sys-conn                           (init-sys-db root (get-default-password))

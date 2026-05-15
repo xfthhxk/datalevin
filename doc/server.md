@@ -3,8 +3,11 @@
 ## Usage
 
 Using the same native command line tool, `dtlv serv` will run in the server mode
-and accepts network connection on port 8898 (default).
+and accepts network connections on `127.0.0.1:8898` by default.
 
+* Use option `--host` to specify the address that the server listens on. The
+  default is `127.0.0.1`. Binding to a non-loopback address, such as
+  `0.0.0.0`, requires setting `DATALEVIN_DEFAULT_PASSWORD`.
 * Use option `-p` to specify an alternative port number that the server listens
   to. Proper firewall settings is needed to allow remote access to the port.
 * `-r` option can be used to specify a root directory path on the server, where
@@ -23,7 +26,7 @@ use cases, it is recommended to run the JVM version of Datalevin as the server,
 e.g. run this command:
 
 ```
-java --add-opens=java.base/java.nio=ALL-UNNAMED --add-opens=java.base/sun.nio.ch=ALL-UNNAMED -jar datalevin-0.9.10-standalone.jar serv -v -r /data/dtlv
+DATALEVIN_DEFAULT_PASSWORD=secret java --add-opens=java.base/java.nio=ALL-UNNAMED --add-opens=java.base/sun.nio.ch=ALL-UNNAMED -jar datalevin-0.9.10-standalone.jar serv --host 0.0.0.0 -v -r /data/dtlv
 ```
 
 The JVM version of Datalevin may use more memory, but it supports much higher
@@ -38,8 +41,9 @@ on the preferred platforms.
 There is a default builtin user `datalevin` with a default password `datalevin`.
 This is a system account that can do everything on the server. The default
 password can be changed by passing in a `DATALEVIN_DEFAULT_PASSWORD` environment
-variable when starting the server. Another option is to set it on the REPL or in
-code:
+variable when starting the server. This environment variable is required when
+binding the server to a non-loopback address. Another option is to set it on the
+REPL or in code:
 
 1. Start the server, maybe as a sudo user, to access the default data root directory
 ```console
@@ -342,9 +346,12 @@ instead of maps.
 Clojure transaction functions defined with `inter-fn` can be serialized and
 sent to the server for execution. They are first evaluated in the sandbox using
 a Clojure interpreter, i.e. [sci](https://github.com/borkdude/sci) based on a
-white list. Descriptor-backed `:db/udf` works differently: only the descriptor
-crosses the wire, and the server resolves it against its own runtime registry
-or resolver.
+white list. The serialized `inter-fn` sandbox does not allow host file I/O,
+namespace mutation, dynamic eval/load, thread/agent APIs, or Java interop,
+except for bounded `Thread/sleep`/`java.lang.Thread/sleep` calls of at most
+1000 ms for compatibility with slow transaction-function tests.
+Descriptor-backed `:db/udf` works differently: only the descriptor crosses the
+wire, and the server resolves it against its own runtime registry or resolver.
 
 ### Security
 

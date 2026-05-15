@@ -26,12 +26,14 @@ Commands:
 
 Options:
   -a, --all                                            Include all of the sub-databases
+  -w, --allow-writes                                   Allow write tools for MCP
   -c, --compact                                        Compact while copying
   -d, --dir PATH                                       Path to the database directory
   -D, --delete                                         Delete the sub-database, not just empty it
   -f, --file PATH                                      Path to the specified file
   -g, --datalog                                        Dump/load as a Datalog database
   -h, --help                                           Show usage
+      --host HOST                  127.0.0.1           Server listening host address
   -i, --idle-timeout IDLE_TIMEOUT  172800000           Server session idle timeout in ms
   -l, --list                                           List the names of sub-databases instead of the content
   -n, --nippy                                          Dump/load database in nippy binary format
@@ -39,7 +41,6 @@ Options:
   -r, --root ROOT                  /var/lib/datalevin  Server root data directory
   -v, --verbose                                        Show verbose server debug log
   -V, --version                                        Show Datalevin version and exit
-  -w, --allow-writes                                   Allow write tools for MCP
 
 Type 'dtlv help <command>' to read about a specific command.
 

@@ -300,8 +300,8 @@
 (declare read-ha-local-last-applied-lsn)
 
 (defn- ha-materialized-follower-lsn
-  [snapshot-lsn payload-lsn]
-  (long-max2 snapshot-lsn payload-lsn))
+  [_snapshot-lsn payload-lsn]
+  (long (or payload-lsn 0)))
 
 (defn- ha-follower-data-lsn-ceiling
   [watermark-lsn snapshot-lsn payload-lsn]
@@ -309,8 +309,8 @@
         materialized-lsn (long (ha-materialized-follower-lsn snapshot-lsn
                                                              payload-lsn))]
     ;; Snapshot-installed followers can have copied payload state ahead of the
-    ;; local txlog watermark. When the payload/snapshot marker exists, it is
-    ;; the materialized floor; otherwise fall back to the txlog watermark.
+    ;; local txlog watermark. The payload marker is the materialized floor;
+    ;; snapshot-current is only a retention marker.
     (if (pos? materialized-lsn)
       materialized-lsn
       watermark-lsn)))
@@ -331,8 +331,8 @@
                                                         payload-lsn)))}))
 
 (defn- ha-clamped-follower-floor-lsn
-  [persisted-lsn snapshot-lsn ceiling-lsn]
-  (let [tracked-lsn (long-max2 persisted-lsn snapshot-lsn)]
+  [persisted-lsn _snapshot-lsn ceiling-lsn]
+  (let [tracked-lsn (long persisted-lsn)]
     (if (pos? (long ceiling-lsn))
       (if (pos? tracked-lsn)
         (long-min2 ceiling-lsn tracked-lsn)
