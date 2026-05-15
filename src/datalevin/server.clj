@@ -207,6 +207,35 @@
 
 (def ^:private has-permission? auth/has-permission?)
 
+(def ^:private privileged-server-option-keys
+  #{:ha-mode
+    :ha-control-plane
+    :ha-members
+    :ha-node-id
+    :ha-client-credentials
+    :ha-fencing-hook
+    :ha-clock-skew-hook
+    :snapshot-dir
+    :spill-opts
+    :embedding-opts
+    :embedding-domains
+    :embedding-providers
+    :embedding-domain-providers})
+
+(defn- privileged-server-options
+  [opts]
+  (not-empty
+   (vec (filter #(contains? (or opts {}) %) privileged-server-option-keys))))
+
+(defn- require-control-for-privileged-server-options!
+  [permissions opts]
+  (when-let [options (privileged-server-options opts)]
+    (when-not (has-permission? ::control ::server nil permissions)
+      (u/raise
+       "Server control permission is required to configure consensus HA or server-local options"
+       {:error :server/privileged-options
+        :options options}))))
+
 (defmacro wrap-permission
   [req-act req-obj req-tgt message & body]
   `(let [{:keys [~'client-id ~'write-bf ~'wire-opts]} @(~'.attachment ~'skey)
@@ -1367,6 +1396,7 @@
           ::database
           (when existing-db? (db-eid sys-conn db-name))
           "Don't have permission to open database"
+        (require-control-for-privileged-server-options! permissions opts)
         (locking (db-open-lock server db-name)
           (let [dir              (db-dir (.-root server) db-name)
                 existing-db-now? (db-exists? server db-name)
