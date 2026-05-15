@@ -69,6 +69,32 @@
           nil))
       candidate-m))
 
+(defn- ha-lease-leader-endpoint
+  [lease]
+  (let [leader-endpoint (:leader-endpoint lease)]
+    (when (and (string? leader-endpoint)
+               (not (s/blank? leader-endpoint)))
+      leader-endpoint)))
+
+(defn- leader-snapshot-source-order
+  [lease source-order]
+  (let [source-order (vec source-order)]
+    (if-let [leader-endpoint (ha-lease-leader-endpoint lease)]
+      (vec (filter #(= leader-endpoint %) source-order))
+      source-order)))
+
+(defn- leader-snapshot-source-unavailable-error
+  [lease source-order snapshot-source-order]
+  (let [leader-endpoint (ha-lease-leader-endpoint lease)]
+    (when (and (empty? snapshot-source-order)
+               leader-endpoint)
+      {:error :ha/follower-snapshot-leader-source-unavailable
+       :message
+       (str "HA follower snapshot bootstrap requires the current lease "
+            "leader as the snapshot source")
+       :data {:leader-endpoint leader-endpoint
+              :source-order (vec source-order)}})))
+
 (defn- ha-local-contiguous-txlog-tail
   [kv-store from-lsn upto-lsn]
   (if (or (nil? kv-store)
@@ -415,12 +441,20 @@
            apply-ha-follower-record!
            sync-ha-follower-batch]}
   db-name m lease source-order next-lsn now-ms]
-  (let [required-lsn (long (max 0 (dec (long next-lsn))))]
-    (loop [remaining source-order
+  (let [required-lsn (long (max 0 (dec (long next-lsn))))
+        snapshot-source-order (leader-snapshot-source-order lease source-order)
+        unavailable-error (leader-snapshot-source-unavailable-error
+                           lease
+                           source-order
+                           snapshot-source-order)
+        initial-errors (cond-> []
+                         unavailable-error
+                         (conj unavailable-error))]
+    (loop [remaining snapshot-source-order
            current-m (normalize-ha-bootstrap-retry-state
                       m m (ha-local-store-reopen-info m))
            current-reopen-info (ha-local-store-reopen-info m)
-           errors []]
+           errors initial-errors]
       (if-let [source-endpoint (first remaining)]
         (let [current-m (normalize-ha-bootstrap-retry-state
                          current-m current-m current-reopen-info)
@@ -613,5 +647,6 @@
                                   :source-endpoint source-endpoint))))))
         {:ok? false
          :state current-m
-         :source-order (vec source-order)
+         :source-order (vec snapshot-source-order)
+         :candidate-source-order (vec source-order)
          :errors errors}))))

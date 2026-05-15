@@ -305,6 +305,123 @@
     (is (= {:store :s} (:state result)))
     (is (= 10 (:trusted-max-lsn result)))))
 
+(deftest bootstrap-snapshot-uses-only-current-leader-source-test
+  (let [attempted-sources (atom [])
+        noted-source (atom nil)
+        result
+        (boot/bootstrap-ha-follower-from-snapshot*
+         {:normalize-ha-bootstrap-retry-state
+          (fn [candidate-m _fallback-m _reopen-info]
+            candidate-m)
+          :ha-local-store-reopen-info
+          (constantly nil)
+          :fetch-ha-endpoint-snapshot-copy!
+          (fn [_db-name _m source-endpoint _snapshot-dir]
+            (swap! attempted-sources conj source-endpoint)
+            {:copy-meta {:snapshot-last-applied-lsn 8
+                         :payload-last-applied-lsn 8
+                         :txlog-last-applied-lsn 10}})
+          :validate-ha-snapshot-copy!
+          (fn [_db-name _m _source-endpoint _snapshot-dir copy-meta _required-lsn]
+            copy-meta)
+          :install-ha-local-snapshot!
+          (fn [m _snapshot-dir]
+            {:ok? true
+             :state (assoc m :installed? true)})
+          :raw-local-kv-store
+          (constantly ::kv)
+          :read-ha-local-snapshot-current-lsn
+          (constantly 8)
+          :reconcile-ha-installed-snapshot-state
+          (fn [state snapshot-lsn trusted-install-lsn]
+            {:state (assoc state
+                           :snapshot-lsn snapshot-lsn
+                           :trusted-install-lsn trusted-install-lsn)
+             :installed-lsn 10})
+          :persist-ha-local-applied-lsn!
+          (fn [_state installed-lsn]
+            installed-lsn)
+          :note-ha-bootstrap-installed-state
+          (fn [state installed-lsn source-endpoint snapshot-lsn now-ms
+               persisted-installed-lsn]
+            (reset! noted-source source-endpoint)
+            (assoc state
+                   :noted [installed-lsn
+                           source-endpoint
+                           snapshot-lsn
+                           now-ms
+                           persisted-installed-lsn]))
+          :sync-ha-follower-batch
+          (fn [_db-name state _lease next-lsn _now-ms]
+            {:state (assoc state :resume-next-lsn next-lsn)})}
+         "db"
+         {:initial? true}
+         {:leader-endpoint "leader"}
+         ["follower" "leader"]
+         9
+         1234)]
+    (is (true? (:ok? result)))
+    (is (= ["leader"] @attempted-sources))
+    (is (= "leader" @noted-source))
+    (is (= "leader"
+           (get-in result [:state :ha-follower-bootstrap-source-endpoint])))
+    (is (= 11 (get-in result [:state :resume-next-lsn])))))
+
+(deftest bootstrap-snapshot-rejects-source-order-without-leader-test
+  (let [attempted-sources (atom [])
+        result
+        (boot/bootstrap-ha-follower-from-snapshot*
+         {:normalize-ha-bootstrap-retry-state
+          (fn [candidate-m _fallback-m _reopen-info]
+            candidate-m)
+          :ha-local-store-reopen-info
+          (constantly nil)
+          :fetch-ha-endpoint-snapshot-copy!
+          (fn [_db-name _m source-endpoint _snapshot-dir]
+            (swap! attempted-sources conj source-endpoint)
+            {:copy-meta {:snapshot-last-applied-lsn 8
+                         :payload-last-applied-lsn 8
+                         :txlog-last-applied-lsn 10}})
+          :validate-ha-snapshot-copy!
+          (fn [_db-name _m _source-endpoint _snapshot-dir copy-meta _required-lsn]
+            copy-meta)
+          :install-ha-local-snapshot!
+          (fn [m _snapshot-dir]
+            {:ok? true
+             :state m})
+          :raw-local-kv-store
+          (constantly ::kv)
+          :read-ha-local-snapshot-current-lsn
+          (constantly 8)
+          :reconcile-ha-installed-snapshot-state
+          (fn [state _snapshot-lsn _trusted-install-lsn]
+            {:state state
+             :installed-lsn 10})
+          :persist-ha-local-applied-lsn!
+          (fn [_state installed-lsn]
+            installed-lsn)
+          :note-ha-bootstrap-installed-state
+          (fn [state _installed-lsn _source-endpoint _snapshot-lsn _now-ms
+               _persisted-installed-lsn]
+            state)
+          :sync-ha-follower-batch
+          (fn [_db-name state _lease _next-lsn _now-ms]
+            {:state state})}
+         "db"
+         {:initial? true}
+         {:leader-endpoint "leader"}
+         ["follower"]
+         9
+         1234)]
+    (is (false? (:ok? result)))
+    (is (empty? @attempted-sources))
+    (is (= [] (:source-order result)))
+    (is (= ["follower"] (:candidate-source-order result)))
+    (is (= :ha/follower-snapshot-leader-source-unavailable
+           (get-in result [:errors 0 :error])))
+    (is (= "leader"
+           (get-in result [:errors 0 :data :leader-endpoint])))))
+
 (deftest bootstrap-uses-installed-local-floor-not-manifest-materialized-floor-test
   (let [seen-reconcile (atom nil)
         result
