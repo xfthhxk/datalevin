@@ -346,9 +346,10 @@ instead of maps.
 Clojure transaction functions defined with `inter-fn` can be serialized and
 sent to the server for execution. They are first evaluated in the sandbox using
 a Clojure interpreter, i.e. [sci](https://github.com/borkdude/sci) based on a
-white list. Descriptor-backed `:db/udf` works differently: only the descriptor
-crosses the wire, and the server resolves it against its own runtime registry
-or resolver.
+white list. The serialized `inter-fn` sandbox does not allow host file I/O,
+namespace mutation, dynamic eval/load, thread/agent APIs, or Java interop.
+Descriptor-backed `:db/udf` works differently: only the descriptor crosses the
+wire, and the server resolves it against its own runtime registry or resolver.
 
 ### Security
 

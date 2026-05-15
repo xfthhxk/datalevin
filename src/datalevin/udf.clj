@@ -19,6 +19,16 @@
 (def ^:private binding-key-keys
   [:udf/lang :udf/kind :udf/id :udf/version])
 
+(def ^:private allowed-keys
+  (set binding-key-keys))
+
+(defn- scalar-version?
+  [x]
+  (or (nil? x)
+      (keyword? x)
+      (string? x)
+      (integer? x)))
+
 (defn descriptor?
   [x]
   (and (map? x) (every? #(contains? x %) required-keys)))
@@ -32,6 +42,9 @@
     (when-not (contains? x k)
       (raise "UDF descriptor is missing required key " k
              {:error :udf/descriptor :value x})))
+  (when-let [unknown (seq (remove allowed-keys (keys x)))]
+    (raise "UDF descriptor contains unsupported key(s) " (vec unknown)
+           {:error :udf/descriptor :value x :unsupported (vec unknown)}))
   (when-not (keyword? (:udf/lang x))
     (raise "UDF descriptor :udf/lang must be a keyword"
            {:error :udf/descriptor :value x}))
@@ -40,6 +53,9 @@
            {:error :udf/descriptor :value x}))
   (when-not (keyword? (:udf/id x))
     (raise "UDF descriptor :udf/id must be a keyword"
+           {:error :udf/descriptor :value x}))
+  (when-not (scalar-version? (:udf/version x))
+    (raise "UDF descriptor :udf/version must be a keyword, string, integer, or nil"
            {:error :udf/descriptor :value x}))
   x)
 

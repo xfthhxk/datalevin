@@ -168,11 +168,15 @@ For non-Clojure runtimes, Datalevin also supports descriptor-backed UDFs with
 than executable code. The actual implementation is provided by a transient
 runtime registry when the database is opened.
 
-The minimal descriptor keys are:
+The supported descriptor keys are:
 
 * `:udf/lang`
 * `:udf/kind`
 * `:udf/id`
+* optional `:udf/version`
+
+Descriptors reject unsupported keys. `:udf/version`, when present, must be a
+keyword, string, integer, or nil.
 
 Transaction UDFs use `:udf/kind :tx-fn`.
 

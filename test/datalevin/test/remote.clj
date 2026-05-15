@@ -99,6 +99,15 @@
             c/db-store-datalog
             nil
             {:snapshot-dir "/tmp/datalevin-denied-snapshots"})))
+      (is (thrown-with-msg?
+           Exception
+           #"Server control permission is required"
+           (cl/open-database
+            @creator-client
+            open-db-name
+            c/db-store-datalog
+            nil
+            {:runtime-opts {:ha-require-udf-ready? true}})))
 
       (cl/create-database admin-client assoc-db-name c/dl-type)
       (cl/grant-permission admin-client
@@ -126,6 +135,13 @@
             @creator-client
             :assoc-opt
             [assoc-db-name :snapshot-dir "/tmp/datalevin-denied-snapshots"])))
+      (is (thrown-with-msg?
+           Exception
+           #"Server control permission is required"
+           (cl/normal-request
+            @creator-client
+            :assoc-opt
+            [assoc-db-name :runtime-opts {:ha-require-udf-ready? true}])))
       (finally
         (when @creator-client
           (cl/disconnect @creator-client))

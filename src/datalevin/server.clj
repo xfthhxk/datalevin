@@ -215,6 +215,7 @@
     :ha-client-credentials
     :ha-fencing-hook
     :ha-clock-skew-hook
+    :runtime-opts
     :snapshot-dir
     :spill-opts
     :embedding-opts

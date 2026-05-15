@@ -2482,6 +2482,7 @@
   (-> (persistable-ha-opts opts)
       (dissoc :embedding-providers
               :embedding-domain-providers
+              :runtime-opts
               raw-persist-open-opts-key)))
 
 (defn- persistable-opts
@@ -2491,6 +2492,7 @@
                  persistable-ha-opts
                  (dissoc :embedding-providers
                          :embedding-domain-providers
+                         :runtime-opts
                          raw-persist-open-opts-key))
         opts (cond-> opts
                (contains? opts :embedding-opts)
