@@ -19,6 +19,40 @@
        "@localhost:" cl/*default-port*
        "/" db-name))
 
+(deftest remote-assoc-opt-requires-alter-permission-test
+  (let [db-name       (str "remote-assoc-opt-auth-" (UUID/randomUUID))
+        username      (str "viewer-" (UUID/randomUUID))
+        password      "viewer-secret"
+        admin-uri     (str "dtlv://"
+                           c/default-username ":"
+                           c/default-password
+                           "@localhost:" cl/*default-port*)
+        viewer-uri    (str "dtlv://"
+                           username ":"
+                           password
+                           "@localhost:" cl/*default-port*)
+        admin-client  (cl/new-client admin-uri)
+        viewer-client (atom nil)]
+    (try
+      (cl/create-database admin-client db-name c/dl-type)
+      (cl/create-user admin-client username password)
+      (cl/grant-permission admin-client
+                           (keyword "datalevin.role" username)
+                           :datalevin.server/view
+                           :datalevin.server/database
+                           db-name)
+      (reset! viewer-client (cl/new-client viewer-uri))
+      (cl/open-database @viewer-client db-name c/db-store-datalog)
+      (is (thrown-with-msg?
+           Exception
+           #"Don't have permission to alter the database"
+           (cl/normal-request
+            @viewer-client :assoc-opt [db-name :validate-data? false])))
+      (finally
+        (when @viewer-client
+          (cl/disconnect @viewer-client))
+        (cl/disconnect admin-client)))))
+
 (deftest remote-db-state-sync-optional-test
   (let [db-name (str "remote-state-sync-" (UUID/randomUUID))
         conn    (d/get-conn (remote-uri db-name)

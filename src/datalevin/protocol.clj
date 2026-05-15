@@ -16,8 +16,7 @@
    [datalevin.datom :as d]
    [datalevin.util :as u]
    [datalevin.spill :as sp]
-   [cognitect.transit :as transit]
-   [taoensso.nippy :as nippy])
+   [cognitect.transit :as transit])
   (:import
    [java.io ByteArrayInputStream ByteArrayOutputStream]
    [java.nio ByteBuffer]
@@ -234,7 +233,7 @@
                      bs)]
      (case (short code)
        1 (read-transit-bytes payload)
-       2 (nippy/fast-thaw payload)
+       2 (b/deserialize payload)
        (u/raise "Unknown wire message format"
                 {:format fmt
                  :format-code code})))))

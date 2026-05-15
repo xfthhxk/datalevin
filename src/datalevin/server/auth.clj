@@ -16,7 +16,7 @@
    [datalevin.util :as u])
   (:import
    [java.nio.charset StandardCharsets]
-   [java.security SecureRandom]
+   [java.security MessageDigest SecureRandom]
    [org.bouncycastle.crypto.generators Argon2BytesGenerator]
    [org.bouncycastle.crypto.params Argon2Parameters
     Argon2Parameters$Builder]))
@@ -115,7 +115,14 @@
 
 (defn password-matches?
   [in-password password-hash salt]
-  (= password-hash (password-hashing in-password salt)))
+  (boolean
+   (when (and (string? in-password)
+              (string? password-hash)
+              (bytes? salt))
+     (MessageDigest/isEqual
+      (.getBytes ^String password-hash StandardCharsets/UTF_8)
+      (.getBytes ^String (password-hashing in-password salt)
+                 StandardCharsets/UTF_8)))))
 
 (defn pull-user
   [sys-conn username]

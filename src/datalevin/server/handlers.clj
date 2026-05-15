@@ -992,10 +992,16 @@
     skey
     #(let [db-name (nth args 0)
            store   (dt-store deps server skey db-name writing?)
-           [k v]   (rest args)
-           result  ((:apply-assoc-opt! deps)
-                    server db-name store writing? k v)]
-       (write-result! deps skey result))))
+           [k v]   (rest args)]
+       (db-alter-permission!
+        deps server skey db-name
+        "Don't have permission to alter the database"
+        (fn []
+          (write-result!
+           deps
+           skey
+           ((:apply-assoc-opt! deps)
+            server db-name store writing? k v)))))))
 
 (defn set-schema
   [deps server skey {:keys [args writing?]}]

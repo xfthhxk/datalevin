@@ -188,9 +188,47 @@
   [fn-name args & body]
   `(def ~fn-name (inter-fn ~args ~@body)))
 
+(defn- quote-form?
+  [x]
+  (and (seq? x)
+       (= 'quote (first x))
+       (= 2 (count x))))
+
+(defn- fn-source-form?
+  [x]
+  (and (seq? x)
+       (#{'fn 'clojure.core/fn} (first x))
+       (or (vector? (second x))
+           (and (symbol? (second x))
+                (vector? (nth x 2 nil))))))
+
+(defn- literal-let-source-form?
+  [x]
+  (and (seq? x)
+       (#{'let 'clojure.core/let} (first x))
+       (= 3 (count x))
+       (let [bindings (second x)]
+         (and (vector? bindings)
+              (even? (count bindings))
+              (every?
+               (fn [[sym value]]
+                 (and (symbol? sym)
+                      (quote-form? value)))
+               (partition 2 bindings))))
+       (fn-source-form? (nth x 2 nil))))
+
+(defn- inter-fn-source-form?
+  [x]
+  (or (fn-source-form? x)
+      (literal-let-source-form? x)))
+
 (defn- source->inter-fn
   "Convert a source form to get an inter-fn"
   [src]
+  (when-not (inter-fn-source-form? src)
+    (u/raise "Invalid inter-fn source form"
+             {:type :datalevin/invalid-inter-fn-source
+              :source src}))
   (with-meta
     (sci/eval-form ctx src)
     {:type   :datalevin/inter-fn
