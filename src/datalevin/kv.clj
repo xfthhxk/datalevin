@@ -2670,81 +2670,94 @@
   "Append a replicated HA record into the local txlog at the same LSN and
   apply its payload to LMDB. This keeps promoted followers on the same WAL
   sequence and preserves source records for downstream followers."
-  [lmdb record]
-  ;; Replay mutates both the runtime txlog metadata and LMDB itself. Keep the
-  ;; same lock order as close/transact paths so follower replay cannot deadlock
-  ;; with concurrent write-txn close on the same store.
-  (with-write-txn-lock-before-runtime-txlog-state
-    lmdb
-    (fn []
-      (let [record-rows (cond
-                          (vector? (:rows record)) (:rows record)
-                          (sequential? (:rows record)) (vec (:rows record))
-                          (vector? (:ops record)) (:ops record)
-                          (sequential? (:ops record)) (vec (:ops record))
-                          :else nil)]
-        (when-not record-rows
-          (raise "Follower replay record is missing payload rows"
-                 {:type :txlog/ha-replay-missing-rows
-                  :record (select-keys record [:lsn :segment-id :offset])}))
-        (if-let [state (txlog-runtime-state lmdb)]
-          (let [_ (txlog/refresh-shared-state! state)
-                record-lsn (long (:lsn record))
-                expected-lsn0 (long @(:next-lsn state))
-                expected-lsn (if (> record-lsn expected-lsn0)
-                               (do
-                                 ;; Snapshot bootstrap and reopen paths can
-                                 ;; advance the persisted payload floor before
-                                 ;; the in-memory txlog cursor catches up.
-                                 ;; Realign once from kv-info before treating a
-                                 ;; one-step-ahead follower record as a hard
-                                 ;; replay gap.
-                                 (align-runtime-txlog-payload-floor! lmdb)
-                                 (long @(:next-lsn state)))
-                               expected-lsn0)]
-            (when (> record-lsn expected-lsn)
-              (raise "Follower replay local txn-log cursor does not match record LSN"
-                     {:type :txlog/ha-replay-lsn-mismatch
-                      :expected-lsn expected-lsn
-                      :record-lsn record-lsn}))
-            (if (< record-lsn expected-lsn)
-              {:lsn record-lsn
-               :skipped? true}
-              (do
-                (txlog-prepare-replay-dbis!
-                 lmdb
-                 [(assoc record :rows record-rows)]
-                 (dec record-lsn))
-                (let [normalized-rows
-                      (rows-vector
-                       (normalize-txlog-replay-avg-rows lmdb
-                                                        record-rows
-                                                        record))
-                      append-res (binding [txlog/*commit-payload-ha-term*
-                                           (some-> (:ha-term record) long)]
-                                   (txlog/append-durable! state
-                                                          normalized-rows
-                                                          txlog-append-hooks))]
-                  (when-not (= record-lsn (long (:lsn append-res)))
-                    (raise "Follower replay appended unexpected txn-log LSN"
-                           {:type :txlog/ha-replay-lsn-mismatch
-                            :expected-lsn record-lsn
-                            :actual-lsn (:lsn append-res)}))
-                  (let [state (refresh-runtime-marker-revision! lmdb state)
-                        marker-entry
-                        (txlog/next-commit-marker-entry
-                         (:commit-marker? state)
-                         (long @(:marker-revision state))
-                         append-res)
-                        rows
-                        (append-payload-lsn-row normalized-rows record-lsn)]
-                    (when marker-entry
-                      (.add ^FastList rows (:row marker-entry)))
-                    (apply-lmdb-after-txlog-append! lmdb state rows)
-                    (txlog/commit-finished! state marker-entry)
-                    (txlog/note-commit-applied! state append-res)
-                    append-res)))))
-          (replay-txlog-rows! lmdb record-rows (:lsn record)))))))
+  ([lmdb record]
+   (mirror-replayed-txlog-record! lmdb record nil))
+  ([lmdb record preapply-rows]
+   ;; Replay mutates both the runtime txlog metadata and LMDB itself. Keep the
+   ;; same lock order as close/transact paths so follower replay cannot deadlock
+   ;; with concurrent write-txn close on the same store.
+   (with-write-txn-lock-before-runtime-txlog-state
+     lmdb
+     (fn []
+       (let [record-rows (cond
+                           (vector? (:rows record)) (:rows record)
+                           (sequential? (:rows record)) (vec (:rows record))
+                           (vector? (:ops record)) (:ops record)
+                           (sequential? (:ops record)) (vec (:ops record))
+                           :else nil)
+             preapply-rows (rows-vector preapply-rows)
+             materialize-rows (if (seq preapply-rows)
+                                (into preapply-rows record-rows)
+                                record-rows)]
+         (when-not record-rows
+           (raise "Follower replay record is missing payload rows"
+                  {:type :txlog/ha-replay-missing-rows
+                   :record (select-keys record [:lsn :segment-id :offset])}))
+         (if-let [state (txlog-runtime-state lmdb)]
+           (let [_ (txlog/refresh-shared-state! state)
+                 record-lsn (long (:lsn record))
+                 expected-lsn0 (long @(:next-lsn state))
+                 expected-lsn (if (> record-lsn expected-lsn0)
+                                (do
+                                  ;; Snapshot bootstrap and reopen paths can
+                                  ;; advance the persisted payload floor before
+                                  ;; the in-memory txlog cursor catches up.
+                                  ;; Realign once from kv-info before treating a
+                                  ;; one-step-ahead follower record as a hard
+                                  ;; replay gap.
+                                  (align-runtime-txlog-payload-floor! lmdb)
+                                  (long @(:next-lsn state)))
+                                expected-lsn0)]
+             (when (> record-lsn expected-lsn)
+               (raise "Follower replay local txn-log cursor does not match record LSN"
+                      {:type :txlog/ha-replay-lsn-mismatch
+                       :expected-lsn expected-lsn
+                       :record-lsn record-lsn}))
+             (if (< record-lsn expected-lsn)
+               {:lsn record-lsn
+                :skipped? true}
+               (do
+                 (txlog-prepare-replay-dbis!
+                  lmdb
+                  [(assoc record :rows materialize-rows)]
+                  (dec record-lsn))
+                 (let [normalized-rows
+                       (rows-vector
+                        (normalize-txlog-replay-avg-rows lmdb
+                                                         record-rows
+                                                         record))
+                       materialized-rows
+                       (if (seq preapply-rows)
+                         (rows-vector
+                          (normalize-txlog-replay-avg-rows lmdb
+                                                           materialize-rows
+                                                           record))
+                         normalized-rows)
+                       append-res (binding [txlog/*commit-payload-ha-term*
+                                            (some-> (:ha-term record) long)]
+                                    (txlog/append-durable! state
+                                                           normalized-rows
+                                                           txlog-append-hooks))]
+                   (when-not (= record-lsn (long (:lsn append-res)))
+                     (raise "Follower replay appended unexpected txn-log LSN"
+                            {:type :txlog/ha-replay-lsn-mismatch
+                             :expected-lsn record-lsn
+                             :actual-lsn (:lsn append-res)}))
+                   (let [state (refresh-runtime-marker-revision! lmdb state)
+                         marker-entry
+                         (txlog/next-commit-marker-entry
+                          (:commit-marker? state)
+                          (long @(:marker-revision state))
+                          append-res)
+                         rows
+                         (append-payload-lsn-row materialized-rows record-lsn)]
+                     (when marker-entry
+                       (.add ^FastList rows (:row marker-entry)))
+                     (apply-lmdb-after-txlog-append! lmdb state rows)
+                     (txlog/commit-finished! state marker-entry)
+                     (txlog/note-commit-applied! state append-res)
+                     append-res)))))
+           (replay-txlog-rows! lmdb materialize-rows (:lsn record))))))))
 
 (defn- transact-with-txlog!
   [lmdb state dbi-name txs k-type v-type]

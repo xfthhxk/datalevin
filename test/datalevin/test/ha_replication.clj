@@ -3,6 +3,7 @@
    [clojure.test :refer [deftest is]]
    [datalevin.constants :as c]
    [datalevin.core :as d]
+   [datalevin.db :as db]
    [datalevin.ha.replication :as drep]
    [datalevin.ha.replication.bootstrap :as boot]
    [datalevin.ha.replication.store :as store]
@@ -10,7 +11,12 @@
    [datalevin.kv :as kv]
    [datalevin.util :as u])
   (:import
+   [datalevin.db DB]
    [java.util UUID]))
+
+(defn- conn-store
+  [conn]
+  (.-store ^DB @conn))
 
 (deftest next-ha-follower-sync-lsn-clamps-to-local-floor-test
   (is (= 15 (#'drep/next-ha-follower-sync-lsn 15 23)))
@@ -294,6 +300,54 @@
           (d/close-kv db))))
       (finally
         (u/delete-files dir)))))
+
+(deftest follower-replay-cleans-divergent-cardinality-one-values-test
+  (let [source-dir   (u/tmp-dir (str "ha-follower-replay-source-"
+                                     (UUID/randomUUID)))
+        follower-dir (u/tmp-dir (str "ha-follower-replay-follower-"
+                                     (UUID/randomUUID)))
+        schema       {:register/key   {:db/valueType :db.type/long
+                                       :db/unique :db.unique/identity}
+                      :register/value {:db/valueType :db.type/long}}]
+    (try
+      (let [source   (d/create-conn source-dir schema {:wal? true})
+            follower (d/create-conn follower-dir schema {:wal? true})]
+        (try
+          (d/transact! source [{:db/id 1
+                                :register/key 0
+                                :register/value 1}])
+          (d/transact! follower [{:db/id 1
+                                  :register/key 0
+                                  :register/value 3}])
+          (d/transact! source [{:db/id 1
+                                :register/key 0
+                                :register/value 1004}])
+          (let [source-store   (conn-store source)
+                follower-store (conn-store follower)
+                source-kv      (store/raw-local-kv-store
+                                {:store source-store})
+                record         (last (kv/open-tx-log-rows source-kv 1 20))]
+            (is (some? record))
+            (when record
+              (#'drep/apply-ha-follower-txlog-record!
+               {:store follower-store
+                :ha-node-id 2
+                :ha-authority-term 1}
+               record)
+              (let [fresh-db (db/new-db follower-store)]
+                (is (= #{[0 1004]}
+                       (set
+                        (d/q '[:find ?k ?v
+                               :where
+                               [?e :register/key ?k]
+                               [?e :register/value ?v]]
+                             fresh-db)))))))
+          (finally
+            (d/close source)
+            (d/close follower))))
+      (finally
+        (u/delete-files source-dir)
+        (u/delete-files follower-dir)))))
 
 (deftest replication-reconcile-wrapper-accepts-apply-function-test
   (let [result (#'drep/reconcile-ha-installed-snapshot-state

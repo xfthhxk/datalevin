@@ -163,3 +163,55 @@
            (#'handlers/with-copy-db-transaction-slot
             deps nil "db" (fn [] :copied))))
     (is (= 1 (.availablePermits lock)))))
+
+(deftest copy-closes-copied-store-before-streaming-test
+  (let [^Semaphore lock (Semaphore. 1)
+        closed?         (atom false)
+        events          (atom [])
+        copied-store    (reify i/IStore
+                          (opts [_] {})
+                          (close [_] (reset! closed? true))
+                          (closed? [_] @closed?))
+        deps            {:handle-message-error!
+                         (fn [_ e] (throw e))
+                         :get-lock
+                         (fn [_ _] lock)
+                         :lmdb
+                         (fn [_ _ _ _] ::source-store)
+                         :with-db-runtime-store-read-access
+                         (fn [_ _ f] (f))
+                         :server-copy-store!
+                         (fn [_ _ _]
+                           (swap! events conj :copy-source))
+                         :open-server-copied-store!
+                         (fn [_ _ _]
+                           (swap! events conj :open-copy)
+                           copied-store)
+                         :copy-response-meta
+                         (fn [_ store base-meta]
+                           (is (identical? copied-store store))
+                           (swap! events conj :meta)
+                           (assoc base-meta :db-name "db"))
+                         :sync-copy-response-store!
+                         (fn [store]
+                           (is (identical? copied-store store))
+                           (swap! events conj :sync)
+                           store)
+                         :close-server-copied-store!
+                         (fn [store]
+                           (is (identical? copied-store store))
+                           (swap! events conj :close)
+                           (i/close store))
+                         :copy-server-file-out!
+                         (fn [_ _ copy-meta]
+                           (is (true? @closed?))
+                           (is (= "db" (:db-name copy-meta)))
+                           (swap! events conj :stream))
+                         :cleanup-copy-tmp-dir!
+                         (fn [_] nil)
+                         :unpin-server-copy-backup-floor!
+                         (fn [& _] nil)}]
+    (#'handlers/copy deps nil nil {:args ["db" false]})
+    (is (= [:copy-source :open-copy :meta :sync :close :stream]
+           @events))
+    (is (= 1 (.availablePermits lock)))))

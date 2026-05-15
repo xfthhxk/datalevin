@@ -1321,22 +1321,27 @@
                              (copy-store! source-store false))
                            (throw e))))))))))
          (let [completed-ms (System/currentTimeMillis)
-               copied-store ((:open-server-copied-store! deps) tf nil nil)]
-           (try
-             (let [copy-meta ((:copy-response-meta deps)
-                              db-name
-                              copied-store
-                              (cond-> {:started-ms started-ms
-                                       :completed-ms completed-ms
-                                       :duration-ms (- completed-ms started-ms)
-                                       :compact? (boolean compact?)}
-                                (map? @copy-backup-pin)
-                                (assoc :backup-pin @copy-backup-pin)))
-                   _ ((:sync-copy-response-store! deps) copied-store)]
-               ((:copy-server-file-out! deps) skey path copy-meta))
-             (finally
-               (when-not (i/closed? copied-store)
-                 ((:close-server-copied-store! deps) copied-store)))))
+               copied-store ((:open-server-copied-store! deps) tf nil nil)
+               copy-meta
+               (try
+                 (let [copy-meta ((:copy-response-meta deps)
+                                  db-name
+                                  copied-store
+                                  (cond-> {:started-ms started-ms
+                                           :completed-ms completed-ms
+                                           :duration-ms (- completed-ms
+                                                           started-ms)
+                                           :compact? (boolean compact?)}
+                                    (map? @copy-backup-pin)
+                                    (assoc :backup-pin @copy-backup-pin)))]
+                   ((:sync-copy-response-store! deps) copied-store)
+                   copy-meta)
+                 (finally
+                   ;; Stream only after the copied LMDB has been finalized on
+                   ;; disk; snapshot metadata must describe the bytes sent.
+                   (when-not (i/closed? copied-store)
+                     ((:close-server-copied-store! deps) copied-store))))]
+           ((:copy-server-file-out! deps) skey path copy-meta))
          (finally
            (best-effort-unpin-server-copy-backup-floor!
             deps db-name @source-store-v @copy-backup-pin)

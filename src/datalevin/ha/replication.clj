@@ -11,6 +11,7 @@
   "Consensus-lease follower replication, probe, and local-store helpers."
   (:require
    [clojure.string :as s]
+   [datalevin.bits :as b]
    [datalevin.constants :as c]
    [datalevin.db :as db]
    [datalevin.ha.client-cache :as cache]
@@ -20,6 +21,7 @@
    [datalevin.ha.snapshot :as snap]
    [datalevin.ha.util :as hu]
    [datalevin.interface :as i]
+   [datalevin.index :as idx]
    [datalevin.kv :as kv]
    [datalevin.remote :as r]
    [datalevin.storage :as st]
@@ -27,6 +29,7 @@
    [datalevin.validate :as vld]
    [taoensso.timbre :as log])
   (:import
+   [datalevin.bits Indexable Retrieved]
    [datalevin.db DB]
    [datalevin.interface IStore ILMDB]
    [datalevin.storage Store]
@@ -1654,6 +1657,101 @@
                        :target-max-tx target-max-tx}))
            (recur next-cur)))))))
 
+(defn- eav-replay-value-aid
+  [x]
+  (cond
+    (instance? Indexable x) (.-a ^Indexable x)
+    (instance? Retrieved x) (.-a ^Retrieved x)
+    :else nil))
+
+(defn- eav-replay-values
+  [x]
+  (cond
+    (nil? x) []
+    (instance? Indexable x) [x]
+    (instance? Retrieved x) [x]
+    (instance? java.util.Collection x) x
+    (sequential? x) x
+    :else []))
+
+(defn- replay-cardinality-one-eav-targets
+  [replay-rows]
+  (into
+   #{}
+   (mapcat
+    (fn [row]
+      (when (vector? row)
+        (let [[op dbi e v] row]
+          (when (and (= dbi c/eav)
+                     (integer? e))
+            (case op
+              :put
+              (when-let [aid (eav-replay-value-aid v)]
+                [[(long e) aid]])
+
+              :del-list
+              (keep
+               (fn [x]
+                 (when-let [aid (eav-replay-value-aid x)]
+                   [(long e) aid]))
+               (eav-replay-values v))
+
+              [])))))
+    replay-rows)))
+
+(defn- replay-indexable-for-existing-eav
+  [kv-store props e aid existing]
+  (cond
+    (instance? Indexable existing)
+    existing
+
+    (instance? Retrieved existing)
+    (let [^Retrieved r existing
+          g              (or (.-g r) c/normal)
+          value          (idx/retrieved->v kv-store r)
+          ^Indexable idx (b/indexable (long e)
+                                      aid
+                                      value
+                                      (idx/value-type props)
+                                      (long g))]
+      (Indexable. (long e) aid value (.-f idx) (.-b idx) g))
+
+    :else
+    nil))
+
+(defn- cardinality-one-eav-cleanup-row-set
+  [^Indexable idx e]
+  (cond-> [[:del-list c/ave idx [(long e)] :avg :id]
+           [:del-list c/eav (long e) [idx] :id :avg]]
+    (not= c/normal (.-g idx))
+    (conj [:del c/giants (.-g idx) :id])))
+
+(defn- ha-cardinality-one-eav-cleanup-rows
+  [store kv-store replay-rows]
+  (if-not (instance? IStore store)
+    []
+    (let [schema  (i/schema store)
+          attrs   (i/attrs store)
+          targets (sort-by (fn [[e aid]] [e aid])
+                           (replay-cardinality-one-eav-targets replay-rows))]
+      (vec
+       (mapcat
+        (fn [[e aid]]
+          (let [attr  (get attrs aid)
+                props (get schema attr)]
+            (when (and props
+                       (not= :db.cardinality/many
+                             (:db/cardinality props)))
+              (mapcat
+               (fn [existing]
+                 (when (and (some? (eav-replay-value-aid existing))
+                            (= aid (eav-replay-value-aid existing)))
+                   (when-let [idx (replay-indexable-for-existing-eav
+                                   kv-store props e aid existing)]
+                     (cardinality-one-eav-cleanup-row-set idx e))))
+               (i/get-list kv-store c/eav (long e) :id :avg)))))
+        targets)))))
+
 (defn ^:redef apply-ha-follower-txlog-record!
   [m record]
   (let [store       (:store m)
@@ -1691,17 +1789,24 @@
                   acc))
               0
               replay-rows)
+            cleanup-rows
+            (ha-cardinality-one-eav-cleanup-rows store kv-store replay-rows)
+            materialize-rows
+            (if (seq cleanup-rows)
+              (into (vec cleanup-rows) replay-rows)
+              replay-rows)
             next-state
             (do
               (let [mirror-res (kv/mirror-replayed-txlog-record! kv-store
-                                                                 record)]
+                                                                 record
+                                                                 cleanup-rows)]
                 ;; A restarted follower can already have the replicated WAL
                 ;; record locally while still missing the materialized LMDB
                 ;; rows. If replay sees the LSN and skips the append, reapply
                 ;; the payload directly so the datalog state catches up to the
                 ;; existing txlog floor.
                 (when (:skipped? mirror-res)
-                  (kv/replay-txlog-rows! kv-store replay-rows
+                  (kv/replay-txlog-rows! kv-store materialize-rows
                                          (long (:lsn record)))))
               (when (and (instance? IStore store)
                          (pos? (long replayed-max-gt)))
