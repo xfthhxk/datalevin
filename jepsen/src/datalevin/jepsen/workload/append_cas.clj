@@ -17,6 +17,8 @@
 
 (defonce ^:private initialized-clusters (init-cache/cluster-cache))
 
+(def ^:private default-setup-timeout-ms 15000)
+
 (defn- append-op?
   [[f]]
   (= :append f))
@@ -74,9 +76,11 @@
     (when-not (contains? @initialized-clusters cluster-id)
       (locking initialized-clusters
         (when-not (contains? @initialized-clusters cluster-id)
-          (local/with-leader-conn
+          (workload.util/with-retrying-leader-conn
             test
             schema
+            (local/workload-setup-timeout-ms cluster-id
+                                             default-setup-timeout-ms)
             (fn [conn]
               (let [db       @conn
                     present  (set (d/q '[:find [?k ...]
