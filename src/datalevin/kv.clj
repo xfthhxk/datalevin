@@ -2968,10 +2968,10 @@
                   had-rollback? (contains? info :wal-rollback?)
                   prev-rollout (:wal-rollout-mode info)
                   prev-rollback (:wal-rollback? info)]
-              ;; Retention-floor bookkeeping is leader-local metadata and
-              ;; should not consume replicated WAL LSNs used by HA promotion
-              ;; checks. Guard the override so admin APIs do not observe the
-              ;; transient rollback mode.
+              ;; Local metadata bookkeeping should not consume replicated WAL
+              ;; LSNs used by HA promotion and follower catch-up checks. Guard
+              ;; the override so admin APIs do not observe the transient
+              ;; rollback mode.
               (vswap! info-v assoc :wal-rollout-mode :rollback :wal-rollback? true)
               (try
                 (f)
@@ -2992,6 +2992,13 @@
                               (dissoc :wal-rollback?)))))))
             (f)))
         (f)))))
+
+(defn ^:no-doc transact-kv-without-txlog!
+  "Apply local metadata rows without consuming a local txlog LSN."
+  [lmdb tx-data]
+  (with-runtime-txlog-rollback
+    lmdb
+    #(i/transact-kv lmdb tx-data)))
 
 (defn- ^:redef write-kv-info-map!
   [lmdb k m]

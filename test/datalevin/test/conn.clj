@@ -11,6 +11,7 @@
    [datalevin.constants :as c]
    [datalevin.kv :as kv]
    [datalevin.lmdb :as lmdb]
+   [datalevin.storage :as s]
    [datalevin.txlog :as txlog]
    [datalevin.util :as u])
   (:import
@@ -70,6 +71,23 @@
       (is (not (u/file-exists (str dir u/+separator+ "txlog"))))
       (finally
         (d/close conn)
+        (u/delete-files dir)))))
+
+(deftest new-db-does-not-enqueue-empty-secondary-index-work-test
+  (let [dir      (u/tmp-dir (str "test-empty-secondary-index-work-"
+                                 (UUID/randomUUID)))
+        enqueued (atom 0)]
+    (try
+      (with-redefs [s/enqueue-secondary-index-work!
+                    (fn [store]
+                      (swap! enqueued inc)
+                      store)]
+        (let [conn (d/create-conn dir)]
+          (try
+            (is (zero? @enqueued))
+            (finally
+              (d/close conn)))))
+      (finally
         (u/delete-files dir)))))
 
 (deftest test-datalog-wal-opt-in-defaults-to-relaxed

@@ -8,8 +8,10 @@
    [datalevin.ha.replication.store :as store]
    [datalevin.interface :as i]
    [datalevin.kv :as kv]
+   [datalevin.storage :as st]
    [datalevin.util :as u])
   (:import
+   [datalevin.storage Store]
    [java.util UUID]))
 
 (deftest next-ha-follower-sync-lsn-clamps-to-local-floor-test
@@ -147,6 +149,81 @@
           (is (= 27 applied-lsn))
           (is (= 27 (:ha-local-last-applied-lsn state)))
           (is (= 28 (:ha-follower-next-lsn state))))))))
+
+(deftest empty-follower-batch-accepts-fresh-bootstrap-floor-test
+  (let [source-endpoint "127.0.0.1:19001"
+        m               {:ha-node-id 2
+                         :ha-local-last-applied-lsn 18
+                         :ha-follower-next-lsn 19
+                         :ha-follower-last-bootstrap-ms 1000
+                         :ha-follower-bootstrap-source-endpoint
+                         source-endpoint
+                         :ha-follower-bootstrap-snapshot-last-applied-lsn
+                         18}
+        lease           {:leader-endpoint source-endpoint
+                         :leader-last-applied-lsn 17}]
+    (is (true? (#'drep/bootstrap-floor-covers-source-behind?
+                m source-endpoint 19 17)))
+    (is (false? (#'drep/bootstrap-floor-covers-source-behind?
+                 (assoc m :ha-follower-bootstrap-source-endpoint "other")
+                 source-endpoint
+                 19
+                 17)))
+    (with-redefs-fn
+      {#'drep/ha-follower-source-endpoints
+       (fn [_m _lease] [source-endpoint])
+       #'drep/ha-leader-endpoint
+       (fn [_m _lease] source-endpoint)
+       #'drep/fetch-leader-watermark-lsn
+       (fn [& _] {:reachable? true :last-applied-lsn 17})
+       #'drep/fetch-ha-leader-txlog-batch
+       (fn [& _] [])
+       #'drep/ha-source-advertised-last-applied-lsn
+       (fn [& _] {:known? true :last-applied-lsn 17})}
+      (fn []
+        (let [result (#'drep/fetch-ha-follower-records-with-gap-fallback
+                      "db" m lease 19 26)]
+          (is (= [] (:records result)))
+          (is (= source-endpoint (:source-endpoint result)))
+          (is (= [source-endpoint] (:source-order result)))
+          (is (true? (:source-last-applied-lsn-known? result)))
+          (is (= 17 (:source-last-applied-lsn result))))))))
+
+(deftest raw-open-opts-persist-without-consuming-txlog-lsn-test
+  (let [dir (u/tmp-dir (str "ha-raw-open-opts-test-" (UUID/randomUUID)))]
+    (try
+      (let [store (st/open dir nil {:db-name "ha-raw-open"
+                                    :wal? true
+                                    :cache-limit 512})]
+        (try
+          (let [lmdb (.-lmdb ^Store store)
+                before-lsn (long (or (:last-applied-lsn
+                                      (kv/txlog-watermarks lmdb))
+                                     0))]
+            (i/close store)
+            (let [reopened (st/open
+                            dir
+                            nil
+                            {:db-name "ha-raw-open"
+                             :wal? true
+                             :cache-limit 1024
+                             :datalevin.storage/raw-persist-open-opts?
+                             true})]
+              (try
+                (let [reopened-lmdb (.-lmdb ^Store reopened)
+                      after-lsn (long (or (:last-applied-lsn
+                                           (kv/txlog-watermarks
+                                            reopened-lmdb))
+                                          0))]
+                  (is (= before-lsn after-lsn))
+                  (is (= 1024 (:cache-limit (i/opts reopened)))))
+                (finally
+                  (i/close reopened)))))
+          (finally
+            (when-not (i/closed? store)
+              (i/close store)))))
+      (finally
+        (u/delete-files dir)))))
 
 (deftest bootstrap-tail-clamps-to-contiguous-materialized-prefix-test
   (let [dir (u/tmp-dir (str "ha-bootstrap-tail-test-" (UUID/randomUUID)))]

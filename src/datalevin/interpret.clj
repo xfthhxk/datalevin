@@ -21,9 +21,11 @@
    [datalevin.util :as u]
    [datalevin.core]
    [datalevin.analyzer]
+   [datalevin.bits]
    [datalevin.stem]
    [datalevin.client]
    [datalevin.constants]
+   [datalevin.lmdb]
    [clojure.string :as s])
   (:import
    [clojure.lang AFn]
@@ -242,6 +244,8 @@
      pull
      pull-many
      q
+     k
+     read-buffer
      resolve-tempid
      retract
      rseek-datoms
@@ -251,12 +255,45 @@
      squuid-time-millis
      tempid
      touch
-     tx-data->simulated-report})
+     tx-data->simulated-report
+     v})
+
+(def ^:private allowed-inter-fn-bits-api
+  '#{read-buffer})
+
+(def ^:private allowed-inter-fn-lmdb-api
+  '#{has-next-val
+     k
+     next-val
+     seek-key
+     v
+     val-iterator})
+
+(def ^:private allowed-inter-fn-interpret-api
+  '#{inter-fn})
+
+(def ^:private runtime-inter-fn-interpret-api
+  (conj allowed-inter-fn-interpret-api 'compile-inter-fn-source))
+
+(def ^:private allowed-inter-fn-datalevin-api
+  {"datalevin.bits" allowed-inter-fn-bits-api
+   "datalevin.core" allowed-inter-fn-core-api
+   "datalevin.interpret" allowed-inter-fn-interpret-api
+   "datalevin.lmdb" allowed-inter-fn-lmdb-api})
 
 (def ^:private allowed-inter-fn-datalevin-namespaces
   #{"datalevin.analyzer"
-    "datalevin.constants"
-    "datalevin.core"})
+    "datalevin.constants"})
+
+(def ^:private allowed-inter-fn-host-symbols
+  '#{Thread/sleep
+     java.lang.Thread/sleep})
+
+(def ^:private allowed-inter-fn-interop-symbols
+  '#{.indexOf
+     .put})
+
+(def ^:private max-inter-fn-sleep-ms 1000)
 
 (declare quote-form?)
 
@@ -286,11 +323,10 @@
 (defn- disallowed-datalevin-symbol?
   [sym]
   (when-let [ns (namespace sym)]
-    (or (and (= ns "datalevin.core")
-             (not (contains? allowed-inter-fn-core-api
-                             (symbol (name sym)))))
-        (and (s/starts-with? ns "datalevin.")
-             (not (contains? allowed-inter-fn-datalevin-namespaces ns))))))
+    (when (s/starts-with? ns "datalevin.")
+      (if-let [allowed-api (allowed-inter-fn-datalevin-api ns)]
+        (not (contains? allowed-api (symbol (name sym))))
+        (not (contains? allowed-inter-fn-datalevin-namespaces ns))))))
 
 (defn- quoted-query-dot-syntax?
   [quoted? sym]
@@ -302,7 +338,9 @@
   [quoted? sym]
   (when (or (contains? disallowed-inter-fn-core-symbol-set sym)
             (disallowed-datalevin-symbol? sym)
-            (and (not (quoted-query-dot-syntax? quoted? sym))
+            (and (not (contains? allowed-inter-fn-host-symbols sym))
+                 (not (contains? allowed-inter-fn-interop-symbols sym))
+                 (not (quoted-query-dot-syntax? quoted? sym))
                  (interop-symbol? sym)))
     (u/raise "Disallowed inter-fn symbol " sym
              {:type   :datalevin/disallowed-inter-fn-symbol
@@ -479,6 +517,24 @@
   [ns syms]
   (available-map ns (select-keys (ns-publics ns) syms) (constantly true)))
 
+(defn- inter-fn-sleep
+  [ms]
+  (let [ms (long ms)]
+    (when-not (<= 0 ms max-inter-fn-sleep-ms)
+      (u/raise "inter-fn Thread/sleep exceeds allowed bound"
+               {:type   :datalevin/inter-fn-sleep-out-of-bounds
+                :ms     ms
+                :max-ms max-inter-fn-sleep-ms}))
+    (Thread/sleep ms)))
+
+(defn- host-vars-map
+  [ns]
+  (let [sci-ns (sci/create-ns ns)]
+    {'sleep (sci/new-var (symbol (name ns) "sleep")
+                         inter-fn-sleep
+                         {:sci.impl/built-in true
+                          :ns sci-ns})}))
+
 (defn- inter-fn-namespaces
   []
   {'clojure.core
@@ -491,11 +547,24 @@
    (user-facing-map 'datalevin.constants
                     (ns-publics 'datalevin.constants))
    'datalevin.core
-   (selected-vars-map 'datalevin.core allowed-inter-fn-core-api)})
+   (selected-vars-map 'datalevin.core allowed-inter-fn-core-api)
+   'datalevin.bits
+   (selected-vars-map 'datalevin.bits allowed-inter-fn-bits-api)
+   'datalevin.lmdb
+   (selected-vars-map 'datalevin.lmdb allowed-inter-fn-lmdb-api)
+   'datalevin.interpret
+   (selected-vars-map 'datalevin.interpret runtime-inter-fn-interpret-api)
+   'Thread
+   (host-vars-map 'Thread)
+   'java.lang.Thread
+   (host-vars-map 'java.lang.Thread)})
+
+(def ^:private inter-fn-classes
+  {'java.util.HashMap java.util.HashMap})
 
 (def ^:no-doc inter-fn-sci-opts
   {:namespaces (inter-fn-namespaces)
-   :classes    {}})
+   :classes    inter-fn-classes})
 
 (def ^:no-doc ctx (sci/init sci-opts))
 

@@ -837,7 +837,7 @@
                    (when info (:max-tx info)))
      (start-sampling store)
      (when (instance? Store store)
-       (s/enqueue-secondary-index-work! ^Store store))
+       (s/enqueue-secondary-index-work-if-needed! ^Store store))
      db)))
 
 (defn transfer

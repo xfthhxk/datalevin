@@ -347,7 +347,9 @@ Clojure transaction functions defined with `inter-fn` can be serialized and
 sent to the server for execution. They are first evaluated in the sandbox using
 a Clojure interpreter, i.e. [sci](https://github.com/borkdude/sci) based on a
 white list. The serialized `inter-fn` sandbox does not allow host file I/O,
-namespace mutation, dynamic eval/load, thread/agent APIs, or Java interop.
+namespace mutation, dynamic eval/load, thread/agent APIs, or Java interop,
+except for bounded `Thread/sleep`/`java.lang.Thread/sleep` calls of at most
+1000 ms for compatibility with slow transaction-function tests.
 Descriptor-backed `:db/udf` works differently: only the descriptor crosses the
 wire, and the server resolves it against its own runtime registry or resolver.
 
