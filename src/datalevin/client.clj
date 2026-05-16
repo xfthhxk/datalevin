@@ -54,6 +54,10 @@
 (defonce ^:private ^java.util.Map ha-write-retry-settings
   (Collections/synchronizedMap (WeakHashMap.)))
 
+(def ^:dynamic *ha-read-min-tx*
+  "Minimum datalog tx a remote HA read must observe."
+  nil)
+
 (declare read-preferred-ha-endpoint
          set-preferred-ha-endpoint!
          clear-preferred-ha-endpoint!
@@ -613,6 +617,17 @@
        (= :ha/write-rejected (:error err-data))
        (true? (:retryable? err-data))))
 
+(defn- retryable-ha-read-reject?
+  [err-data]
+  (and (map? err-data)
+       (= :ha/read-rejected (:error err-data))
+       (true? (:retryable? err-data))))
+
+(defn- retryable-ha-reject?
+  [err-data]
+  (or (retryable-ha-write-reject? err-data)
+      (retryable-ha-read-reject? err-data)))
+
 (defn ^:no-doc disable-ha-write-retry!
   [client]
   (when client
@@ -1117,7 +1132,7 @@
              :else
              (let [retry-err     (:err-data outcome)
                    retry-message (:message outcome)]
-               (if (retryable-ha-write-reject? retry-err)
+               (if (retryable-ha-reject? retry-err)
                  (let [[extra seen']
                        (collect-ha-retry-endpoints
                          seen
@@ -1234,9 +1249,13 @@
                    :result (:result outcome)}
 
                   :error
-                  (raise-normal-request-error
-                    req (:message outcome) (:err-data outcome)
-                    {:ha-pinned-endpoint endpoint})
+                  (if (retryable-ha-read-reject? (:err-data outcome))
+                    (do
+                      (clear-preferred-ha-read-endpoint! client db-name)
+                      {:handled? false})
+                    (raise-normal-request-error
+                      req (:message outcome) (:err-data outcome)
+                      {:ha-pinned-endpoint endpoint}))
 
                   :exception
                   (do
@@ -1280,6 +1299,20 @@
       disconnect
       new-client-for-endpoint)))
 
+(defn- retry-ha-read-reject
+  [client req message err-data]
+  (when-let [db-name (request-db-name req)]
+    (when-let [routing-context (client-routing-context client)]
+      (retry-ha-write-request*
+        req
+        message
+        err-data
+        routing-context
+        request
+        disconnect
+        new-client-for-endpoint
+        #(set-preferred-ha-read-endpoint! client db-name %)))))
+
 (defn ^:no-doc normal-request
   "Send request to server and returns results. Does not use the
   copy-in protocol. `call` is a keyword, `args` is a vector,
@@ -1287,7 +1320,12 @@
   ([client call args]
    (normal-request client call args false))
   ([client call args writing?]
-   (let [req                 {:type call :args args :writing? writing?}
+   (let [read-min-tx         (when (and (not writing?)
+                                        (integer? *ha-read-min-tx*))
+                               (long *ha-read-min-tx*))
+         req                 (cond-> {:type call :args args :writing? writing?}
+                               read-min-tx
+                               (assoc :ha-read-min-tx read-min-tx))
          db-name             (request-db-name req)
          known-endpoints     (and db-name
                                   (known-ha-db-endpoints client db-name))
@@ -1362,12 +1400,23 @@
        (try
          (let [{:keys [type message result err-data]} (request client req)]
            (if (= type :error-response)
-             (if (and writing?
-                      (retryable-ha-write-reject? err-data))
+             (cond
+               (and writing?
+                    (retryable-ha-write-reject? err-data))
                (do
                  (cache-known-ha-db-endpoints! client db-name
                                                (:ha-retry-endpoints err-data))
                  (retry-ha-write-request client req message err-data))
+
+               (and (not writing?)
+                    (retryable-ha-read-reject? err-data))
+               (do
+                 (cache-known-ha-db-endpoints! client db-name
+                                               (:ha-retry-endpoints err-data))
+                 (or (retry-ha-read-reject client req message err-data)
+                     (raise-normal-request-error req message err-data nil)))
+
+               :else
                (raise-normal-request-error req message err-data nil))
              (do
                (when retry-context

@@ -120,6 +120,55 @@
   [deps server skey db-name writing?]
   ((:store deps) server skey db-name writing?))
 
+(defn- ha-read-min-tx
+  [message]
+  (when-let [tx (:ha-read-min-tx message)]
+    (when (integer? tx)
+      (long tx))))
+
+(defn- ha-read-retry-endpoints
+  [db-state]
+  (let [owner-node-id (:ha-authority-owner-node-id db-state)
+        owner-endpoint (or (get-in db-state
+                                   [:ha-authority-lease :leader-endpoint])
+                           (some->> (:ha-members db-state)
+                                    (filter #(= owner-node-id (:node-id %)))
+                                    first
+                                    :endpoint))]
+    (->> (cond-> []
+           (and (string? owner-endpoint)
+                (not (s/blank? owner-endpoint)))
+           (conj owner-endpoint)
+           :always
+           (into (keep :endpoint (:ha-members db-state))))
+         (remove s/blank?)
+         distinct
+         vec)))
+
+(defn- ensure-ha-read-floor!
+  [deps server db-name writing? message dt-store]
+  (when-let [min-tx (and (not writing?) (ha-read-min-tx message))]
+    (let [min-tx (long min-tx)
+          max-tx (long (or (i/max-tx dt-store) 0))]
+      (when (< max-tx min-tx)
+        (let [state (db-state deps server db-name)]
+          (u/raise "HA read floor not satisfied"
+                   {:error :ha/read-rejected
+                    :reason :read-floor-not-satisfied
+                    :retryable? true
+                    :indeterminate? true
+                    :db-name db-name
+                    :ha-read-min-tx min-tx
+                    :ha-local-max-tx max-tx
+                    :ha-role (:ha-role state)
+                    :ha-node-id (:ha-node-id state)
+                    :ha-authoritative-leader-node-id
+                    (:ha-authority-owner-node-id state)
+                    :ha-authoritative-leader-endpoint
+                    (get-in state [:ha-authority-lease :leader-endpoint])
+                    :ha-retry-endpoints
+                    (ha-read-retry-endpoints state)}))))))
+
 (defn- kv-store
   [deps server skey db-name writing?]
   ((:lmdb deps) server skey db-name writing?))
@@ -309,16 +358,17 @@
 
 (defn- normal-dt-handler
   [op]
-  (fn [deps server skey {:keys [args writing?]}]
+  (fn [deps server skey {:keys [args writing?] :as message}]
     (with-error
       deps
       skey
-      #(write-result!
-        deps
-        skey
-        (apply op
-               (dt-store deps server skey (nth args 0) writing?)
-               (rest args))))))
+      #(let [db-name (nth args 0)
+             store   (dt-store deps server skey db-name writing?)]
+         (ensure-ha-read-floor! deps server db-name writing? message store)
+         (write-result!
+          deps
+          skey
+          (apply op store (rest args)))))))
 
 (defn- normal-kv-handler
   [op]
@@ -335,16 +385,17 @@
 
 (defn- copying-dt-handler
   [op]
-  (fn [deps server skey {:keys [args writing?]}]
+  (fn [deps server skey {:keys [args writing?] :as message}]
     (with-error
       deps
       skey
-      #(write-or-copy-result!
-        deps
-        skey
-        (apply op
-               (dt-store deps server skey (nth args 0) writing?)
-               (rest args))))))
+      #(let [db-name (nth args 0)
+             store   (dt-store deps server skey db-name writing?)]
+         (ensure-ha-read-floor! deps server db-name writing? message store)
+         (write-or-copy-result!
+          deps
+          skey
+          (apply op store (rest args)))))))
 
 (defn- copying-kv-handler
   [op]
@@ -361,17 +412,19 @@
 
 (defn- deserialized-normal-dt-handler
   [idx op]
-  (fn [deps server skey {:keys [args writing?]}]
+  (fn [deps server skey {:keys [args writing?] :as message}]
     (with-error
       deps
       skey
       #(let [args (deserialize-arg args idx)]
-         (write-result!
-           deps
-           skey
-           (apply op
-                  (dt-store deps server skey (nth args 0) writing?)
-                  (rest args)))))))
+         (let [db-name (nth args 0)
+               store   (dt-store deps server skey db-name writing?)]
+           (ensure-ha-read-floor! deps server db-name writing?
+                                  message store)
+           (write-result!
+            deps
+            skey
+            (apply op store (rest args))))))))
 
 (defn- deserialized-normal-kv-handler
   [idx op]
@@ -389,17 +442,19 @@
 
 (defn- deserialized-copying-dt-handler
   [idx op]
-  (fn [deps server skey {:keys [args writing?]}]
+  (fn [deps server skey {:keys [args writing?] :as message}]
     (with-error
       deps
       skey
       #(let [args (deserialize-arg args idx)]
-         (write-or-copy-result!
-           deps
-           skey
-           (apply op
-                  (dt-store deps server skey (nth args 0) writing?)
-                  (rest args)))))))
+         (let [db-name (nth args 0)
+               store   (dt-store deps server skey db-name writing?)]
+           (ensure-ha-read-floor! deps server db-name writing?
+                                  message store)
+           (write-or-copy-result!
+            deps
+            skey
+            (apply op store (rest args))))))))
 
 (defn- deserialized-copying-kv-handler
   [idx op]
@@ -1167,12 +1222,13 @@
                    (write-tx-response! deps skey response))))))))))
 
 (defn db-info
-  [deps server skey {:keys [args writing?]}]
+  [deps server skey {:keys [args writing?] :as message}]
   (with-error
     deps
     skey
     #(let [db-name  (nth args 0)
            dt-store (dt-store deps server skey db-name writing?)]
+       (ensure-ha-read-floor! deps server db-name writing? message dt-store)
        (write-result! deps skey
                       {:max-eid       (i/init-max-eid dt-store)
                        :max-tx        (i/max-tx dt-store)
@@ -2007,25 +2063,54 @@
                (write-complete! deps skey))))))))
 
 (defn q
-  [deps server skey message]
-  (with-error deps skey #(sapi/q (api-deps deps) server skey message)))
+  [deps server skey {:keys [args writing?] :as message}]
+  (with-error
+    deps
+    skey
+    #(let [db-name (nth args 0)
+           store   (dt-store deps server skey db-name writing?)]
+       (ensure-ha-read-floor! deps server db-name writing? message store)
+       (sapi/q (api-deps deps) server skey message))))
 
 (defn pull
-  [deps server skey message]
-  (with-error deps skey #(sapi/pull (api-deps deps) server skey message)))
+  [deps server skey {:keys [args writing?] :as message}]
+  (with-error
+    deps
+    skey
+    #(let [db-name (nth args 0)
+           store   (dt-store deps server skey db-name writing?)]
+       (ensure-ha-read-floor! deps server db-name writing? message store)
+       (sapi/pull (api-deps deps) server skey message))))
 
 (defn pull-many
-  [deps server skey message]
-  (with-error deps skey #(sapi/pull-many (api-deps deps) server skey message)))
+  [deps server skey {:keys [args writing?] :as message}]
+  (with-error
+    deps
+    skey
+    #(let [db-name (nth args 0)
+           store   (dt-store deps server skey db-name writing?)]
+       (ensure-ha-read-floor! deps server db-name writing? message store)
+       (sapi/pull-many (api-deps deps) server skey message))))
 
 (defn explain
-  [deps server skey message]
-  (with-error deps skey #(sapi/explain (api-deps deps) server skey message)))
+  [deps server skey {:keys [args writing?] :as message}]
+  (with-error
+    deps
+    skey
+    #(let [db-name (nth args 0)
+           store   (dt-store deps server skey db-name writing?)]
+       (ensure-ha-read-floor! deps server db-name writing? message store)
+       (sapi/explain (api-deps deps) server skey message))))
 
 (defn fulltext-datoms
-  [deps server skey message]
+  [deps server skey {:keys [args writing?] :as message}]
   (with-error
-    deps skey #(sapi/fulltext-datoms (api-deps deps) server skey message)))
+    deps
+    skey
+    #(let [db-name (nth args 0)
+           store   (dt-store deps server skey db-name writing?)]
+       (ensure-ha-read-floor! deps server db-name writing? message store)
+       (sapi/fulltext-datoms (api-deps deps) server skey message))))
 
 (defn new-search-engine
   [deps server ^SelectionKey skey message]

@@ -19,6 +19,47 @@
        "@localhost:" cl/*default-port*
        "/" db-name))
 
+(deftest remote-read-floor-is-sent-on-datalog-reads-test
+  (let [seen (atom nil)]
+    (with-redefs [cl/request (fn [_client req]
+                               (reset! seen req)
+                               {:type :command-complete
+                                :result :ok})]
+      (binding [cl/*ha-read-min-tx* 42]
+        (is (= :ok
+               (cl/normal-request nil :db-info ["floor-db"] false))))
+      (is (= 42 (:ha-read-min-tx @seen)))
+
+      (binding [cl/*ha-read-min-tx* 42]
+        (is (= :ok
+               (cl/normal-request nil :tx-data ["floor-db" [] false] true))))
+      (is (nil? (:ha-read-min-tx @seen))))))
+
+(deftest remote-read-floor-rejects-stale-server-test
+  (let [db-name   (str "remote-read-floor-" (UUID/randomUUID))
+        admin-uri (str "dtlv://"
+                       c/default-username ":"
+                       c/default-password
+                       "@localhost:" cl/*default-port*)
+        client    (cl/new-client admin-uri)]
+    (try
+      (cl/create-database client db-name c/dl-type)
+      (cl/open-database client db-name c/db-store-datalog)
+      (let [response (cl/request
+                      client
+                      {:type :db-info
+                       :args [db-name]
+                       :writing? false
+                       :ha-read-min-tx 999999})]
+        (is (= :error-response (:type response)))
+        (is (= :ha/read-rejected (get-in response [:err-data :error])))
+        (is (= :read-floor-not-satisfied
+               (get-in response [:err-data :reason])))
+        (is (true? (get-in response [:err-data :retryable?])))
+        (is (true? (get-in response [:err-data :indeterminate?]))))
+      (finally
+        (cl/disconnect client)))))
+
 (deftest remote-assoc-opt-requires-alter-permission-test
   (let [db-name       (str "remote-assoc-opt-auth-" (UUID/randomUUID))
         username      (str "viewer-" (UUID/randomUUID))

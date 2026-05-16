@@ -26,7 +26,7 @@
    [clojure.lang Seqable IReduceInit]
    [java.lang AutoCloseable]
    [java.util.concurrent ConcurrentHashMap]
-   [java.util.concurrent.atomic AtomicBoolean]
+   [java.util.concurrent.atomic AtomicBoolean AtomicLong]
    [java.nio.file Files Paths StandardOpenOption LinkOption]
    [java.security MessageDigest]
    [java.net URI]))
@@ -289,6 +289,28 @@
 
 (declare ->DatalogStore)
 
+(defn- update-read-floor-tx!
+  [^AtomicLong read-floor-tx tx]
+  (when (integer? tx)
+    (let [tx (long tx)]
+      (loop []
+        (let [current (.get read-floor-tx)]
+          (when (and (> tx current)
+                     (not (.compareAndSet read-floor-tx current tx)))
+            (recur))))))
+  read-floor-tx)
+
+(defn- current-read-floor-tx
+  [^AtomicLong read-floor-tx]
+  (let [tx (.get read-floor-tx)]
+    (when (pos? tx) tx)))
+
+(defn- datalog-request
+  [^AtomicLong read-floor-tx client call args writing?]
+  (binding [cl/*ha-read-min-tx* (when-not writing?
+                                  (current-read-floor-tx read-floor-tx))]
+    (cl/normal-request client call args writing?)))
+
 (deftype DatalogStore [^String uri
                        ^String db-name
                        ^Client client
@@ -296,6 +318,7 @@
                        write-txn
                        writing?
                        open-db-info
+                       ^AtomicLong read-floor-tx
                        ^AtomicBoolean sampling-started?
                        owns-client?
                        ^AtomicBoolean closed?]
@@ -305,18 +328,19 @@
   (write-txn [_] write-txn)
 
   (mark-write [_]
-    (->DatalogStore uri db-name tx-client tx-client
-                    (volatile! :remote-dl-mutex) true
-                    open-db-info
-                    sampling-started?
-                    owns-client?
-                    closed?))
+    (DatalogStore. uri db-name tx-client tx-client
+                   (volatile! :remote-dl-mutex) true
+                   open-db-info
+                   read-floor-tx
+                   sampling-started?
+                   owns-client?
+                   closed?))
 
   IStore
-  (opts [_] (cl/normal-request client :opts [db-name] writing?))
+  (opts [_] (datalog-request read-floor-tx client :opts [db-name] writing?))
 
   (assoc-opt [_ k v]
-    (cl/normal-request client :assoc-opt [db-name k v] writing?))
+    (datalog-request read-floor-tx client :assoc-opt [db-name k v] writing?))
 
   (db-name [_] db-name)
 
@@ -328,7 +352,7 @@
         ;; Closing a remote store detaches the client/session view of the DB.
         ;; It is not a with-transaction control message and must not route
         ;; through the server's write-runner path.
-        (cl/normal-request client :close [db-name] false))
+        (datalog-request read-floor-tx client :close [db-name] false))
       (when (and owns-client? (not (cl/disconnected? client)))
         (cl/disconnect client))
       (when (and (not (identical? tx-client client))
@@ -338,23 +362,24 @@
   (closed? [_]
     (if (or (.get closed?) (cl/disconnected? client))
       true
-      (cl/normal-request client :closed? [db-name] writing?)))
+      (datalog-request read-floor-tx client :closed? [db-name] writing?)))
 
   (last-modified [_]
-    (cl/normal-request client :last-modified [db-name] writing?))
+    (datalog-request read-floor-tx client :last-modified [db-name] writing?))
 
-  (schema [_] (cl/normal-request client :schema [db-name] writing?))
+  (schema [_] (datalog-request read-floor-tx client :schema [db-name] writing?))
 
-  (rschema [_] (cl/normal-request client :rschema [db-name] writing?))
+  (rschema [_] (datalog-request read-floor-tx client :rschema [db-name] writing?))
 
   (set-schema [_ new-schema]
-    (cl/normal-request client :set-schema [db-name new-schema] writing?))
+    (datalog-request read-floor-tx client :set-schema
+                     [db-name new-schema] writing?))
 
   (init-max-eid [_]
-    (cl/normal-request client :init-max-eid [db-name] writing?))
+    (datalog-request read-floor-tx client :init-max-eid [db-name] writing?))
 
   (max-tx [_]
-    (cl/normal-request client :max-tx [db-name] writing?))
+    (datalog-request read-floor-tx client :max-tx [db-name] writing?))
 
   (swap-attr [this attr f]
     (.swap-attr this attr f nil nil))
@@ -362,57 +387,69 @@
     (.swap-attr this attr f x nil))
   (swap-attr [_ attr f x y]
     (let [frozen-f (b/serialize f)]
-      (cl/normal-request
-        client :swap-attr [db-name attr frozen-f x y] writing?)))
+      (datalog-request
+        read-floor-tx client :swap-attr
+        [db-name attr frozen-f x y] writing?)))
 
   (del-attr [_ attr]
-    (cl/normal-request client :del-attr [db-name attr] writing?))
+    (datalog-request read-floor-tx client :del-attr [db-name attr] writing?))
 
   (rename-attr [_ attr new-attr]
-    (cl/normal-request client :rename-attr [db-name attr new-attr] writing?))
+    (datalog-request read-floor-tx client :rename-attr
+                     [db-name attr new-attr] writing?))
 
   (datom-count [_ index]
-    (cl/normal-request client :datom-count [db-name index] writing?))
+    (datalog-request read-floor-tx client :datom-count
+                     [db-name index] writing?))
 
   (load-datoms [_ datoms]
     (load-datoms* client db-name datoms :raw false writing?))
 
-  (fetch [_ datom] (cl/normal-request client :fetch [db-name datom] writing?))
+  (fetch [_ datom]
+    (datalog-request read-floor-tx client :fetch [db-name datom] writing?))
 
   (populated? [_ index low-datom high-datom]
-    (cl/normal-request
-      client :populated? [db-name index low-datom high-datom] writing?))
+    (datalog-request
+      read-floor-tx client :populated?
+      [db-name index low-datom high-datom] writing?))
 
   (size [_ index low-datom high-datom]
-    (cl/normal-request
-      client :size [db-name index low-datom high-datom] writing?))
+    (datalog-request
+      read-floor-tx client :size [db-name index low-datom high-datom]
+      writing?))
 
   (head [_ index low-datom high-datom]
-    (cl/normal-request
-      client :head [db-name index low-datom high-datom] writing?))
+    (datalog-request
+      read-floor-tx client :head [db-name index low-datom high-datom]
+      writing?))
 
   (tail [_ index high-datom low-datom]
-    (cl/normal-request
-      client :tail [db-name index high-datom low-datom] writing?))
+    (datalog-request
+      read-floor-tx client :tail [db-name index high-datom low-datom]
+      writing?))
 
   (slice [_ index low-datom high-datom]
-    (cl/normal-request
-      client :slice [db-name index low-datom high-datom] writing?))
+    (datalog-request
+      read-floor-tx client :slice [db-name index low-datom high-datom]
+      writing?))
 
   (rslice [_ index high-datom low-datom]
-    (cl/normal-request
-      client :rslice [db-name index high-datom low-datom] writing?))
+    (datalog-request
+      read-floor-tx client :rslice [db-name index high-datom low-datom]
+      writing?))
 
   (e-datoms [_ e]
-    (cl/normal-request client :e-datoms [db-name e] writing?))
+    (datalog-request read-floor-tx client :e-datoms [db-name e] writing?))
 
   (e-first-datom [_ e]
-    (cl/normal-request client :e-first-datom [db-name e] writing?))
+    (datalog-request read-floor-tx client :e-first-datom
+                     [db-name e] writing?))
 
   (start-sampling [_]
     (when (.compareAndSet sampling-started? false true)
       (try
-        (cl/normal-request client :start-sampling [db-name] writing?)
+        (datalog-request read-floor-tx client :start-sampling
+                         [db-name] writing?)
         (catch Exception e
           (.set sampling-started? false)
           (throw e)))))
@@ -420,88 +457,104 @@
   (stop-sampling [_]
     (when (.compareAndSet sampling-started? true false)
       (try
-        (cl/normal-request client :stop-sampling [db-name] writing?)
+        (datalog-request read-floor-tx client :stop-sampling
+                         [db-name] writing?)
         (catch Exception e
           (.set sampling-started? true)
           (throw e)))))
 
   (analyze [_ attr]
-    (cl/normal-request client :analyze [db-name attr]))
+    (datalog-request read-floor-tx client :analyze [db-name attr] writing?))
 
   (av-datoms [_ a v]
-    (cl/normal-request client :av-datoms [db-name a v] writing?))
+    (datalog-request read-floor-tx client :av-datoms
+                     [db-name a v] writing?))
 
   (av-first-datom [_ a v]
-    (cl/normal-request client :av-first-datom [db-name a v] writing?))
+    (datalog-request read-floor-tx client :av-first-datom
+                     [db-name a v] writing?))
 
   (av-first-e [_ a v]
-    (cl/normal-request client :av-first-e [db-name a v] writing?))
+    (datalog-request read-floor-tx client :av-first-e
+                     [db-name a v] writing?))
 
   (ea-first-datom [_ e a]
-    (cl/normal-request client :ea-first-datom [db-name e a] writing?))
+    (datalog-request read-floor-tx client :ea-first-datom
+                     [db-name e a] writing?))
 
   (ea-first-v [_ e a]
-    (cl/normal-request client :ea-first-v [db-name e a] writing?))
+    (datalog-request read-floor-tx client :ea-first-v
+                     [db-name e a] writing?))
 
   (v-datoms [_ v]
-    (cl/normal-request client :v-datoms [db-name v] writing?))
+    (datalog-request read-floor-tx client :v-datoms [db-name v] writing?))
 
   (size-filter [_ index pred low-datom high-datom]
     (let [frozen-pred (b/serialize pred)]
-      (cl/normal-request
-        client :size-filter
+      (datalog-request
+        read-floor-tx client :size-filter
         [db-name index frozen-pred low-datom high-datom] writing?)))
 
   (head-filter [_ index pred low-datom high-datom]
     (let [frozen-pred (b/serialize pred)]
-      (cl/normal-request
-        client :head-filter
+      (datalog-request
+        read-floor-tx client :head-filter
         [db-name index frozen-pred low-datom high-datom] writing?)))
 
   (tail-filter [_ index pred high-datom low-datom]
     (let [frozen-pred (b/serialize pred)]
-      (cl/normal-request
-        client :tail-filter
+      (datalog-request
+        read-floor-tx client :tail-filter
         [db-name index frozen-pred high-datom low-datom] writing?)))
 
   (slice-filter [_ index pred low-datom high-datom]
     (let [frozen-pred (b/serialize pred)]
-      (cl/normal-request
-        client :slice-filter
+      (datalog-request
+        read-floor-tx client :slice-filter
         [db-name index frozen-pred low-datom high-datom] writing?)))
 
   (rslice-filter [_ index pred high-datom low-datom]
     (let [frozen-pred (b/serialize pred)]
-      (cl/normal-request
-        client :rslice-filter
+      (datalog-request
+        read-floor-tx client :rslice-filter
         [db-name index frozen-pred high-datom low-datom] writing?)))
 
   IRemoteDB
   (q [_ query inputs]
-    (cl/normal-request client :q [db-name query inputs] writing?))
+    (datalog-request read-floor-tx client :q [db-name query inputs] writing?))
 
   (pull [_ pattern id opts]
-    (cl/normal-request client :pull [db-name pattern id opts] writing?))
+    (datalog-request read-floor-tx client :pull
+                     [db-name pattern id opts] writing?))
 
   (pull-many [_ pattern id opts]
-    (cl/normal-request client :pull-many [db-name pattern id opts] writing?))
+    (datalog-request read-floor-tx client :pull-many
+                     [db-name pattern id opts] writing?))
 
   (explain [_ opts query inputs]
-    (cl/normal-request client :explain [db-name opts query inputs] writing?))
+    (datalog-request read-floor-tx client :explain
+                     [db-name opts query inputs] writing?))
 
   (fulltext-datoms [_ query opts]
-    (cl/normal-request client :fulltext-datoms [db-name query opts] writing?))
+    (datalog-request read-floor-tx client :fulltext-datoms
+                     [db-name query opts] writing?))
 
   (db-info [_]
     (if-let [cached @open-db-info]
       (do
         (vreset! open-db-info nil)
+        (update-read-floor-tx! read-floor-tx (:max-tx cached))
         cached)
-      (cl/normal-request client :db-info [db-name] writing?)))
+      (let [info (datalog-request read-floor-tx client :db-info
+                                  [db-name] writing?)]
+        (update-read-floor-tx! read-floor-tx (:max-tx info))
+        info)))
 
   (tx-data [_ data simulated?]
-    (load-datoms* client db-name data :txs+info simulated? writing?
-                  open-db-info))
+    (let [result (load-datoms* client db-name data :txs+info simulated?
+                               writing? open-db-info)]
+      (update-read-floor-tx! read-floor-tx (get-in result [:db-info :max-tx]))
+      result))
 
   (open-transact [this]
     (#'cl/sync-ha-routing! client tx-client)
@@ -511,12 +564,13 @@
     (#'cl/sync-ha-routing! tx-client client)
     (let [active-client (#'cl/active-ha-request-client tx-client)]
       (#'cl/disable-ha-write-retry! active-client)
-      (->DatalogStore uri db-name active-client active-client
-                      (volatile! :remote-dl-mutex) true
-                      open-db-info
-                      sampling-started?
-                      owns-client?
-                      closed?)))
+      (DatalogStore. uri db-name active-client active-client
+                     (volatile! :remote-dl-mutex) true
+                     open-db-info
+                     read-floor-tx
+                     sampling-started?
+                     owns-client?
+                     closed?)))
 
   (abort-transact [this]
     (try
@@ -597,6 +651,7 @@
    (DatalogStore. uri db-name client client
                   write-txn writing?
                   open-db-info
+                  (AtomicLong. (long (or (:max-tx @open-db-info) 0)))
                   sampling-started?
                   owns-client?
                   closed?))
@@ -605,6 +660,7 @@
    (DatalogStore. uri db-name client tx-client
                   write-txn writing?
                   open-db-info
+                  (AtomicLong. (long (or (:max-tx @open-db-info) 0)))
                   sampling-started?
                   owns-client?
                   closed?)))

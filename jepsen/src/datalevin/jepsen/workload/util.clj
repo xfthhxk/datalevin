@@ -14,7 +14,9 @@
       (boolean
        (some
         (fn [cause]
-          (true? (:indeterminate? (ex-data cause))))
+          (let [data (ex-data cause)]
+            (or (true? (:indeterminate? data))
+                (true? (:indeterminate? (:err-data data))))))
         (take-while some? (iterate ex-cause e))))))
 
 (defn exception-result-type
