@@ -739,6 +739,10 @@
    :ha-follower-leader-endpoint
    :ha-follower-source-endpoint
    :ha-follower-source-order
+   :ha-follower-source-order-dynamic?
+   :ha-follower-source-order-authority-version
+   :ha-follower-source-last-applied-lsn-known?
+   :ha-follower-source-last-applied-lsn
    :ha-follower-last-bootstrap-ms
    :ha-follower-bootstrap-source-endpoint
    :ha-follower-bootstrap-snapshot-last-applied-lsn
@@ -964,13 +968,7 @@
                      (integer? lease-local-deadline-ms)
                      (>= (+ (long now-ms)
                             (long lease-admission-margin-ms))
-                         (long lease-local-deadline-ms)))
-                (and (not (integer? lease-local-deadline-nanos))
-                     (not (integer? lease-local-deadline-ms))
-                     (or (nil? lease-until-ms)
-                         (>= (+ (long now-ms)
-                                (long lease-admission-margin-ms))
-                             (long lease-until-ms)))))
+                         (long lease-local-deadline-ms))))
             (merge common-meta
                    {:error :ha/write-rejected
                     :reason :lease-expired
@@ -991,6 +989,19 @@
                     :reason :term-mismatch
                     :ha-leader-term leader-term
                     :ha-authority-term authority-term
+                    :retryable? true})
+
+            (and (not (integer? lease-local-deadline-nanos))
+                 (not (integer? lease-local-deadline-ms)))
+            (merge common-meta
+                   {:error :ha/write-rejected
+                    :reason :lease-deadline-unknown
+                    :lease-until-ms lease-until-ms
+                    :lease-local-deadline-ms lease-local-deadline-ms
+                    :lease-local-deadline-nanos lease-local-deadline-nanos
+                    :ha-authority-now-ms (:ha-authority-now-ms m)
+                    :now-ms now-ms
+                    :now-nanos now-nanos
                     :retryable? true})
 
             :else nil))))))

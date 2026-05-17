@@ -218,7 +218,29 @@
 
 (defn- lease-entry
   [state db-identity]
-  (get-in state [:leases db-identity] {:lease nil :version 0}))
+  (let [entry (get-in state [:leases db-identity])
+        entry (if (map? entry) entry {})
+        lease (:lease entry)
+        version (long (or (:version entry) 0))
+        term (long (max 0
+                        (long (or (:term entry) 0))
+                        (long (lease/observed-term lease))))
+        leader-last-applied-lsn
+        (long (max 0
+                   (long (or (:leader-last-applied-lsn entry) 0))
+                   (long (or (:leader-last-applied-lsn lease) 0))))]
+    {:lease lease
+     :version version
+     :term term
+     :leader-last-applied-lsn leader-last-applied-lsn}))
+
+(defn- lease-entry-record
+  [lease version term leader-last-applied-lsn]
+  {:lease lease
+   :version (long version)
+   :term (long (max 0 (long (or term 0))))
+   :leader-last-applied-lsn
+   (long (max 0 (long (or leader-last-applied-lsn 0))))})
 
 (defn- running?
   [running-v]
@@ -244,7 +266,11 @@
                      authority-now-ms
                      clock-skew-budget-ms)
         effective-now-ms authority-now-ms
-        {:keys [lease version]} (lease-entry state db-identity)
+        {lease :lease
+         version :version
+         entry-term :term
+         entry-leader-last-applied-lsn :leader-last-applied-lsn}
+        (lease-entry state db-identity)
         observed-version (long (or observed-version 0))
         current-version (long version)]
     (cond
@@ -288,7 +314,7 @@
                 :version current-version}}
 
       (< (long (or leader-last-applied-lsn 0))
-         (long (or (:leader-last-applied-lsn lease) 0)))
+         (long entry-leader-last-applied-lsn))
       {:state state
        :result {:ok? false
                 :reason :leader-last-applied-lsn-regressed
@@ -298,11 +324,14 @@
                 :leader-last-applied-lsn
                 (long (or leader-last-applied-lsn 0))
                 :authority-leader-last-applied-lsn
-                (long (or (:leader-last-applied-lsn lease) 0))}}
+                (long entry-leader-last-applied-lsn)}}
 
       :else
       (let [observed    (or observed-lease lease)
-            new-term    (lease/next-term observed)
+            new-term    (u/long-inc
+                         (long (max (long (lease/observed-term observed))
+                                    (long entry-term))))
+            new-lsn     (long (or leader-last-applied-lsn 0))
             new-lease   (lease/new-lease-record
                          {:db-identity db-identity
                           :leader-node-id leader-node-id
@@ -311,11 +340,13 @@
                           :lease-renew-ms lease-renew-ms
                           :lease-timeout-ms lease-timeout-ms
                           :now-ms effective-now-ms
-                          :leader-last-applied-lsn leader-last-applied-lsn})
+                          :leader-last-applied-lsn new-lsn})
             new-version (inc current-version)]
         {:state (assoc-in state [:leases db-identity]
-                          {:lease new-lease
-                           :version new-version})
+                          (lease-entry-record new-lease
+                                              new-version
+                                              new-term
+                                              new-lsn))
          :result {:ok? true
                   :lease new-lease
                   :version new-version
@@ -323,9 +354,9 @@
                   :authority-now-ms authority-now-ms}}))))
 
 (defn- monotonic-leader-last-applied-lsn
-  [lease leader-last-applied-lsn]
+  [entry leader-last-applied-lsn]
   (long (max 0
-             (long (or (:leader-last-applied-lsn lease) 0))
+             (long (or (:leader-last-applied-lsn entry) 0))
              (long (or leader-last-applied-lsn 0)))))
 
 (defn- apply-renew-transition
@@ -341,7 +372,7 @@
                      authority-now-ms
                      clock-skew-budget-ms)
         effective-now-ms authority-now-ms
-        {:keys [lease version]} (lease-entry state db-identity)
+        {:keys [lease version] :as entry} (lease-entry state db-identity)
         current-version (long version)]
     (cond
       skew-result
@@ -393,7 +424,7 @@
       :else
       (let [leader-last-applied-lsn
             (monotonic-leader-last-applied-lsn
-             lease
+             entry
              leader-last-applied-lsn)
             new-lease   (lease/new-lease-record
                          {:db-identity db-identity
@@ -406,8 +437,11 @@
                           :leader-last-applied-lsn leader-last-applied-lsn})
             new-version (inc current-version)]
         {:state (assoc-in state [:leases db-identity]
-                          {:lease new-lease
-                           :version new-version})
+                          (lease-entry-record new-lease
+                                              new-version
+                                              (max (long (:term entry))
+                                                   (long term))
+                                              leader-last-applied-lsn))
          :result {:ok? true
                   :lease new-lease
                   :version new-version
@@ -417,7 +451,7 @@
 (defn- apply-release-transition
   [state {:keys [db-identity leader-node-id term] :as req}]
   (validate-release-request! req)
-  (let [{:keys [lease version]} (lease-entry state db-identity)
+  (let [{:keys [lease version] :as entry} (lease-entry state db-identity)
         current-version (long version)]
     (cond
       (nil? lease)
@@ -449,10 +483,17 @@
                 :version current-version}}
 
       :else
-      (let [new-version (inc current-version)]
+      (let [new-version (inc current-version)
+            retained-term (long (max (long (:term entry))
+                                     (long (lease/observed-term lease))
+                                     (long term)))
+            retained-lsn (max (long (:leader-last-applied-lsn entry))
+                              (long (or (:leader-last-applied-lsn lease) 0)))]
         {:state (assoc-in state [:leases db-identity]
-                          {:lease nil
-                           :version new-version})
+                          (lease-entry-record nil
+                                              new-version
+                                              retained-term
+                                              retained-lsn))
          :result {:ok? true
                   :released? true
                   :lease nil
@@ -725,7 +766,13 @@
       (u/raise "HA control snapshot :voters must be a vector"
                {:error :ha/control-invalid-snapshot-state
                 :voters voters}))
-    (let [peer-ids (mapv (fn [idx peer-id]
+    (let [leases (into {}
+                       (map (fn [[db-identity entry]]
+                              [db-identity
+                               (lease-entry {:leases {db-identity entry}}
+                                            db-identity)]))
+                       leases)
+          peer-ids (mapv (fn [idx peer-id]
                            (require-non-blank-string!
                             peer-id [:snapshot :voters idx :peer-id])
                            (parse-peer-id!
@@ -1816,15 +1863,15 @@
      (let [{:keys [group-id running-v]} authority]
        (ensure-running! running-v)
        (lease/validate-lease-key! group-id db-identity)
-       (let [snapshot (await-read-state-barrier-compat!
-                       authority
-                       timeout-ms)
-             {:keys [lease version]} (lease-entry snapshot db-identity)]
-         {:lease lease
-          :version version
-          :authority-now-ms (long (control-now-ms))
-          :membership-hash (:membership-hash snapshot)
-          :voters (:voters snapshot)}))
+	       (let [snapshot (await-read-state-barrier-compat!
+	                       authority
+	                       timeout-ms)
+	             {:keys [lease version]} (lease-entry snapshot db-identity)]
+	         {:lease lease
+	          :version version
+	          :authority-now-ms nil
+	          :membership-hash (:membership-hash snapshot)
+	          :voters (:voters snapshot)}))
 
      (satisfies? ILeaseAuthority authority)
      (let [{:keys [lease version]} (read-lease authority db-identity)]

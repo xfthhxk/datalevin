@@ -95,6 +95,18 @@
        :data {:leader-endpoint leader-endpoint
               :source-order (vec source-order)}})))
 
+(defn- authority-confirmed-lsn
+  [lease]
+  (long (max 0 (long (or (:leader-last-applied-lsn lease) 0)))))
+
+(defn- cap-lsn-to-authority
+  [lease lsn]
+  (let [lsn (long (max 0 (long (or lsn 0))))
+        authority-lsn (authority-confirmed-lsn lease)]
+    (if (pos? (long authority-lsn))
+      (long-min2 lsn authority-lsn)
+      lsn)))
+
 (defn- ha-local-contiguous-txlog-tail
   [kv-store from-lsn upto-lsn]
   (if (or (nil? kv-store)
@@ -442,7 +454,9 @@
            apply-ha-follower-record!
            sync-ha-follower-batch]}
   db-name m lease source-order next-lsn now-ms]
-  (let [required-lsn (long (max 0 (dec (long next-lsn))))
+  (let [required-lsn (cap-lsn-to-authority
+                      lease
+                      (long (max 0 (dec (long next-lsn)))))
         snapshot-source-order (leader-snapshot-source-order lease source-order)
         unavailable-error (leader-snapshot-source-unavailable-error
                            lease
@@ -531,8 +545,10 @@
                           ;; is already queryable.
                           (long local-payload-lsn)
                           install-target-lsn
-                          (long (max materialized-floor-lsn
-                                     manifest-txlog-lsn))
+                          (cap-lsn-to-authority
+                           lease
+                           (long (max materialized-floor-lsn
+                                      manifest-txlog-lsn)))
                           {:keys [state installed-lsn replayed-last-term]
                            :as replay}
                           (reconcile-installed-snapshot-state

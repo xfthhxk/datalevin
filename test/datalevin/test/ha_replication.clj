@@ -9,12 +9,12 @@
    [datalevin.ha.replication.store :as store]
    [datalevin.interface :as i]
    [datalevin.kv :as kv]
-  [datalevin.storage :as st]
-  [datalevin.util :as u])
- (:import
-  [datalevin.db DB]
-  [datalevin.storage Store]
-  [java.util UUID]))
+   [datalevin.storage :as st]
+   [datalevin.util :as u])
+  (:import
+   [datalevin.db DB]
+   [datalevin.storage Store]
+   [java.util UUID]))
 
 (defn- conn-store
   [conn]
@@ -49,6 +49,17 @@
       (is (identical? installed-store
                       (store/explicit-raw-local-kv-store
                        {:store installed-store}))))))
+
+(deftest follower-lsn-cap-respects-authority-confirmed-lsn-test
+  (let [cap #'store/cap-follower-lsn-to-authority]
+    (is (= 17 (cap {:ha-role :follower
+                    :ha-authority-lease {:leader-last-applied-lsn 17}}
+                   18)))
+    (is (= 18 (cap {:ha-role :leader
+                    :ha-authority-lease {:leader-last-applied-lsn 17}}
+                   18)))
+    (is (= 18 (cap {:ha-role :follower}
+                   18)))))
 
 (deftest gap-bootstrap-next-lsn-uses-first-retained-source-lsn-test
   (is (= 24 (#'drep/ha-gap-bootstrap-next-lsn
@@ -796,6 +807,67 @@
     (is (= 3 (get-in result [:state :ha-follower-last-applied-term])))
     (is (= 11 (get-in result [:state :resume-next-lsn])))
     (is (= [10 "127.0.0.1:19001" 10 1234 10]
+           (get-in result [:state :noted])))))
+
+(deftest bootstrap-caps-required-floor-to-authority-lsn-test
+  (let [trusted-reconcile (atom nil)
+        resume-next-lsn (atom nil)
+        source-endpoint "127.0.0.1:19001"
+        result
+        (boot/bootstrap-ha-follower-from-snapshot*
+         {:normalize-ha-bootstrap-retry-state
+          (fn [candidate-m _fallback-m _reopen-info]
+            candidate-m)
+          :ha-local-store-reopen-info
+          (constantly nil)
+          :fetch-ha-endpoint-snapshot-copy!
+          (fn [_db-name _m _source-endpoint _snapshot-dir]
+            {:copy-meta {:db-name "db"
+                         :db-identity "db-id"
+                         :snapshot-last-applied-lsn 16
+                         :payload-last-applied-lsn 17
+                         :txlog-last-applied-lsn 17}})
+          :validate-ha-snapshot-copy!
+          boot/validate-ha-snapshot-copy!
+          :install-ha-local-snapshot!
+          (fn [m _snapshot-dir]
+            {:ok? true
+             :state (assoc m :installed? true)})
+          :raw-local-kv-store
+          (constantly (fake-info-kv-store
+                       {[c/kv-info c/wal-local-payload-lsn] 17}))
+          :read-ha-local-snapshot-current-lsn
+          (constantly 16)
+          :reconcile-ha-installed-snapshot-state
+          (fn [state materialized-lsn trusted-install-lsn _apply-record-fn]
+            (reset! trusted-reconcile [materialized-lsn trusted-install-lsn])
+            {:state state
+             :installed-lsn trusted-install-lsn})
+          :persist-ha-local-applied-lsn!
+          (fn [_state installed-lsn]
+            installed-lsn)
+          :note-ha-bootstrap-installed-state
+          (fn [state installed-lsn source snapshot-lsn now-ms persisted-lsn]
+            (assoc state
+                   :noted [installed-lsn source snapshot-lsn now-ms
+                           persisted-lsn]))
+          :apply-ha-follower-record!
+          (fn [state _record] state)
+          :sync-ha-follower-batch
+          (fn [_db-name state _lease next-lsn _now-ms]
+            (reset! resume-next-lsn next-lsn)
+            {:state (assoc state :resume-next-lsn next-lsn)})}
+         "db"
+         {:ha-db-identity "db-id"}
+         {:leader-endpoint source-endpoint
+          :leader-last-applied-lsn 17}
+         [source-endpoint]
+         19
+         1234)]
+    (is (true? (:ok? result)))
+    (is (= [17 17] @trusted-reconcile))
+    (is (= 18 @resume-next-lsn))
+    (is (= [17 source-endpoint 17 1234 17]
            (get-in result [:state :noted])))))
 
 (deftest bootstrap-rejects-installed-copy-below-required-floor-test

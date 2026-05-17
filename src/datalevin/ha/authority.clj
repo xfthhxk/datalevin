@@ -128,13 +128,34 @@
    now-ms]
   (let [refresh-ms (or observed-at-ms now-ms)
         observed-term (:term lease)
-        observed-owner-node-id (:leader-node-id lease)]
+        observed-owner-node-id (:leader-node-id lease)
+        old-lease (:ha-authority-lease m)
+        same-lease-deadline?
+        (and (map? lease)
+             (map? old-lease)
+             (= (:leader-node-id lease) (:leader-node-id old-lease))
+             (= (:term lease) (:term old-lease))
+             (= (:lease-until-ms lease) (:lease-until-ms old-lease)))
+        next-authority-now-ms
+        (if (integer? authority-now-ms)
+          authority-now-ms
+          (:ha-authority-now-ms m))
+        next-lease-local-deadline-ms
+        (cond
+          (integer? lease-local-deadline-ms) lease-local-deadline-ms
+          same-lease-deadline? (:ha-lease-local-deadline-ms m)
+          :else nil)
+        next-lease-local-deadline-nanos
+        (cond
+          (integer? lease-local-deadline-nanos) lease-local-deadline-nanos
+          same-lease-deadline? (:ha-lease-local-deadline-nanos m)
+          :else nil)]
     (cond-> (assoc m
                    :ha-authority-lease lease
                    :ha-authority-version version
-                   :ha-authority-now-ms authority-now-ms
-                   :ha-lease-local-deadline-ms lease-local-deadline-ms
-                   :ha-lease-local-deadline-nanos lease-local-deadline-nanos
+                   :ha-authority-now-ms next-authority-now-ms
+                   :ha-lease-local-deadline-ms next-lease-local-deadline-ms
+                   :ha-lease-local-deadline-nanos next-lease-local-deadline-nanos
                    :ha-authority-owner-node-id observed-owner-node-id
                    :ha-authority-term observed-term
                    :ha-lease-until-ms (:lease-until-ms lease)

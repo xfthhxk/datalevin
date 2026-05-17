@@ -75,13 +75,20 @@
    :ha-local-last-persisted-applied-ms
    :ha-follower-last-apply-readback
    :ha-follower-last-batch-records
+   :ha-follower-last-applied-term
    :ha-follower-batches-since-persist
+   :ha-follower-requested-batch-records
    :ha-follower-next-lsn
    :ha-follower-last-batch-size
+   :ha-follower-last-batch-estimated-bytes
    :ha-follower-last-sync-ms
    :ha-follower-leader-endpoint
    :ha-follower-source-endpoint
    :ha-follower-source-order
+   :ha-follower-source-last-applied-lsn-known?
+   :ha-follower-source-last-applied-lsn
+   :ha-follower-source-order-dynamic?
+   :ha-follower-source-order-authority-version
    :ha-follower-last-bootstrap-ms
    :ha-follower-bootstrap-source-endpoint
    :ha-follower-bootstrap-snapshot-last-applied-lsn
