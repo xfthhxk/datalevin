@@ -180,6 +180,34 @@
           (is (= 27 (:ha-local-last-applied-lsn state)))
           (is (= 28 (:ha-follower-next-lsn state))))))))
 
+(deftest failed-gap-bootstrap-backs-off-follower-sync-test
+  (let [now-ms 10000
+        m      {:ha-role :follower
+                :ha-node-id 2
+                :ha-local-last-applied-lsn 12
+                :ha-follower-next-lsn 13
+                :ha-follower-last-batch-size 8
+                :ha-follower-sync-backoff-ms 500
+                :ha-lease-renew-ms 1000
+                :ha-authority-version 42}
+        details {:message "Follower txlog gap unresolved and snapshot bootstrap failed"
+                 :data {:error :ha/follower-snapshot-bootstrap-failed}}]
+    (let [state (#'drep/assoc-ha-follower-gap-bootstrap-failure
+                 m
+                 now-ms
+                 ["127.0.0.1:19001"]
+                 false
+                 (:ha-authority-version m)
+                 details)]
+      (is (= :sync-failed (:ha-follower-last-error state)))
+      (is (true? (:ha-follower-degraded? state)))
+      (is (= :wal-gap (:ha-follower-degraded-reason state)))
+      (is (= 0 (:ha-follower-last-batch-size state)))
+      (is (nil? (:ha-follower-last-batch-records state)))
+      (is (= 1000 (:ha-follower-sync-backoff-ms state)))
+      (is (= 11000 (:ha-follower-next-sync-not-before-ms state)))
+      (is (= 42 (:ha-follower-source-order-authority-version state))))))
+
 (deftest empty-follower-batch-accepts-fresh-bootstrap-floor-test
   (let [source-endpoint "127.0.0.1:19001"
         m               {:ha-node-id 2

@@ -2246,6 +2246,30 @@
       (long-min2 (long tracked-next-lsn) local-next-lsn)
       local-next-lsn)))
 
+(defn- assoc-ha-follower-gap-bootstrap-failure
+  [bootstrap-state now-ms source-order source-order-dynamic?
+   source-order-authority-version details]
+  (let [backoff-ms (next-ha-follower-sync-backoff-ms bootstrap-state)]
+    (assoc bootstrap-state
+           :ha-follower-source-order source-order
+           :ha-follower-source-order-dynamic? source-order-dynamic?
+           :ha-follower-source-order-authority-version
+           source-order-authority-version
+           :ha-follower-last-error :sync-failed
+           :ha-follower-last-error-details details
+           :ha-follower-last-error-ms now-ms
+           :ha-follower-degraded? true
+           :ha-follower-degraded-reason :wal-gap
+           :ha-follower-degraded-details details
+           :ha-follower-degraded-since-ms
+           (or (:ha-follower-degraded-since-ms bootstrap-state)
+               now-ms)
+           :ha-follower-last-batch-size 0
+           :ha-follower-last-batch-records nil
+           :ha-follower-sync-backoff-ms backoff-ms
+           :ha-follower-next-sync-not-before-ms
+           (+ (long now-ms) (long backoff-ms)))))
+
 (defn- sync-ha-follower-state
   [db-name m now-ms]
   (if (not= :follower (:ha-role m))
@@ -2323,7 +2347,8 @@
                                      now-ms)]
                       (if (:ok? bootstrap)
                         (:state bootstrap)
-                        (let [details {:message
+                        (let [bootstrap-state (:state bootstrap)
+                              details {:message
                                        "Follower txlog gap unresolved and snapshot bootstrap failed"
                                        :data
                                        {:error :ha/follower-snapshot-bootstrap-failed
@@ -2332,24 +2357,13 @@
                                         :snapshot-errors (:errors bootstrap)}
                                        :leader-endpoint leader-endpoint
                                        :source-order source-order}]
-                          (assoc (:state bootstrap)
-                                 :ha-follower-source-order source-order
-                                 :ha-follower-source-order-dynamic?
-                                 source-order-dynamic?
-                                 :ha-follower-source-order-authority-version
-                                 (:ha-authority-version error-state)
-                                 :ha-follower-last-error :sync-failed
-                                 :ha-follower-last-error-details details
-                                 :ha-follower-last-error-ms now-ms
-                                 :ha-follower-degraded? true
-                                 :ha-follower-degraded-reason :wal-gap
-                                 :ha-follower-degraded-details details
-                                 :ha-follower-degraded-since-ms
-                                 (or (:ha-follower-degraded-since-ms
-                                      (:state bootstrap))
-                                     now-ms)
-                                 :ha-follower-sync-backoff-ms nil
-                                 :ha-follower-next-sync-not-before-ms nil))))
+                          (assoc-ha-follower-gap-bootstrap-failure
+                           bootstrap-state
+                           now-ms
+                           source-order
+                           source-order-dynamic?
+                           (:ha-authority-version error-state)
+                           details))))
 
                     :else
                     (let [details {:message (ex-message e)
