@@ -380,7 +380,23 @@
          next-sync-not-before-ms
          (when (integer? (:ha-follower-next-sync-not-before-ms m))
            (long (:ha-follower-next-sync-not-before-ms m)))
-         batch-size (long (or (:ha-follower-last-batch-size m) 0))]
+         batch-size (long (or (:ha-follower-last-batch-size m) 0))
+         requested-batch-records
+         (long (or (:ha-follower-requested-batch-records m) 0))
+         source-last-applied-lsn
+         (when (integer? (:ha-follower-source-last-applied-lsn m))
+           (long (:ha-follower-source-last-applied-lsn m)))
+         next-lsn
+         (when (integer? (:ha-follower-next-lsn m))
+           (long (:ha-follower-next-lsn m)))
+         source-caught-up?
+         (and (true? (:ha-follower-source-last-applied-lsn-known? m))
+              source-last-applied-lsn
+              next-lsn
+              (> (long next-lsn) (long source-last-applied-lsn)))
+         full-batch?
+         (and (pos? requested-batch-records)
+              (>= batch-size requested-batch-records))]
      (cond
        (and (= :follower role)
             next-sync-not-before-ms)
@@ -388,8 +404,10 @@
          (long (if (<= remaining-ms 0) 1 remaining-ms)))
 
        (and (= :follower role)
-            (pos? batch-size))
-       0
+            (pos? batch-size)
+            full-batch?
+            (not source-caught-up?))
+       (if (> requested-batch-records 1) 0 1)
 
        :else
        idle-ms))))

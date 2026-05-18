@@ -192,6 +192,42 @@
     (is (true? (:ha-follower-source-order-dynamic? patch)))
     (is (= 9 (:ha-follower-source-order-authority-version patch)))))
 
+(deftest follower-sync-loop-sleep-throttles-caught-up-or-tiny-batches-test
+  (let [base {:ha-role :follower
+              :ha-lease-renew-ms 1000}]
+    (is (= 250 (sha/ha-follower-loop-sleep-ms
+                (assoc base :ha-follower-last-batch-size 0)
+                1000)))
+    (is (= 0 (sha/ha-follower-loop-sleep-ms
+              (assoc base
+                     :ha-follower-last-batch-size 8
+                     :ha-follower-requested-batch-records 8)
+              1000)))
+    (is (= 1 (sha/ha-follower-loop-sleep-ms
+              (assoc base
+                     :ha-follower-last-batch-size 1
+                     :ha-follower-requested-batch-records 1)
+              1000)))
+    (is (= 250 (sha/ha-follower-loop-sleep-ms
+                (assoc base
+                       :ha-follower-last-batch-size 1
+                       :ha-follower-requested-batch-records 8)
+                1000)))
+    (is (= 250 (sha/ha-follower-loop-sleep-ms
+                (assoc base
+                       :ha-follower-last-batch-size 8
+                       :ha-follower-requested-batch-records 8
+                       :ha-follower-source-last-applied-lsn-known? true
+                       :ha-follower-source-last-applied-lsn 17
+                       :ha-follower-next-lsn 18)
+                1000)))
+    (is (= 1200 (sha/ha-follower-loop-sleep-ms
+                 (assoc base
+                        :ha-follower-last-batch-size 8
+                        :ha-follower-requested-batch-records 8
+                        :ha-follower-next-sync-not-before-ms 2200)
+                 1000)))))
+
 (deftest write-admission-rejects-stale-clock-skew-check-test
   (with-redefs [ha/ha-now-ms (constantly 5000)
                 ha/ha-now-nanos (constantly 5000000)]
