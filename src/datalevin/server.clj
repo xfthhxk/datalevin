@@ -488,13 +488,16 @@
 (defn- fresh-runtime-db-info
   [store]
   (when (instance? Store store)
-    (let [lmdb          (kv/raw-lmdb (.-lmdb ^Store store))
-          max-tx        (long (or (i/get-value lmdb c/meta :max-tx :attr :long)
-                                  (i/max-tx store)))
-          last-modified (long (or (i/get-value lmdb c/meta :last-modified
-                                               :attr :long)
-                                  (i/last-modified store)
-                                  (System/currentTimeMillis)))]
+    (let [lmdb           (kv/raw-lmdb (.-lmdb ^Store store))
+          durable-max-tx (i/get-value lmdb c/meta :max-tx :attr :long)
+          max-tx         (long (or durable-max-tx
+                                   (i/max-tx store)))
+          last-modified  (long (or (i/get-value lmdb c/meta :last-modified
+                                                :attr :long)
+                                   (i/last-modified store)
+                                   (System/currentTimeMillis)))]
+      (when durable-max-tx
+        (st/sync-max-tx-floor! store durable-max-tx))
       {:max-eid       (i/init-max-eid store)
        :max-tx        max-tx
        :last-modified last-modified})))

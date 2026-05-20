@@ -32,7 +32,8 @@
    [java.nio.channels SelectionKey SocketChannel]
    [java.nio.file Paths]
    [java.util Map$Entry UUID]
-   [java.util.concurrent ConcurrentHashMap Semaphore]))
+   [java.util.concurrent ConcurrentHashMap Semaphore]
+   [datalevin.storage Store]))
 
 (def ^:private view-act :datalevin.server/view)
 (def ^:private alter-act :datalevin.server/alter)
@@ -126,6 +127,39 @@
     (when (integer? tx)
       (long tx))))
 
+(defn- durable-dt-store-max-tx ^long
+  [dt-store]
+  (long
+   (or (when (instance? Store dt-store)
+         (try
+           (when-let [durable-max-tx
+                      (i/get-value (kv/raw-lmdb (.-lmdb ^Store dt-store))
+                                   c/meta
+                                   :max-tx
+                                   :attr
+                                   :long)]
+             (try
+               (st/sync-max-tx-floor! dt-store durable-max-tx)
+               (catch Throwable _
+                 nil))
+             durable-max-tx)
+           (catch Throwable _
+             nil)))
+       (try
+         (i/max-tx dt-store)
+         (catch Throwable _
+           nil))
+       0)))
+
+(defn- dt-store-max-tx ^long
+  [dt-store]
+  (long
+   (or (try
+         (i/max-tx dt-store)
+         (catch Throwable _
+           nil))
+       0)))
+
 (defn- ha-read-retry-endpoints
   [db-state]
   (let [owner-node-id (:ha-authority-owner-node-id db-state)
@@ -149,7 +183,8 @@
   [deps server db-name writing? message dt-store]
   (when-let [min-tx (and (not writing?) (ha-read-min-tx message))]
     (let [min-tx (long min-tx)
-          max-tx (long (or (i/max-tx dt-store) 0))]
+          max-tx (durable-dt-store-max-tx dt-store)
+          store-max-tx (dt-store-max-tx dt-store)]
       (when (< max-tx min-tx)
         (let [state (db-state deps server db-name)]
           (u/raise "HA read floor not satisfied"
@@ -160,6 +195,7 @@
                     :db-name db-name
                     :ha-read-min-tx min-tx
                     :ha-local-max-tx max-tx
+                    :ha-local-store-max-tx store-max-tx
                     :ha-role (:ha-role state)
                     :ha-node-id (:ha-node-id state)
                     :ha-authoritative-leader-node-id
@@ -1231,7 +1267,7 @@
        (ensure-ha-read-floor! deps server db-name writing? message dt-store)
        (write-result! deps skey
                       {:max-eid       (i/init-max-eid dt-store)
-                       :max-tx        (i/max-tx dt-store)
+                       :max-tx        (durable-dt-store-max-tx dt-store)
                        :last-modified (i/last-modified dt-store)
                        :opts          (i/opts dt-store)}))))
 

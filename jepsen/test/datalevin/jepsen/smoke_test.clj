@@ -882,6 +882,21 @@
     (is (string? (get-in failover-op [:value :stopped])))
     (is (string? (get-in stabilize-op [:value :leader])))))
 
+(deftest bank-checker-is-unknown-without-successful-reads-test
+  (let [bank-checker (:checker (bank/workload {:key-count 4
+                                               :account-balance 100}))
+        result       (checker/check
+                      bank-checker
+                      {}
+                      [{:type :info
+                        :f :read-all
+                        :value nil
+                        :error :ha/read-rejected}]
+                      {})]
+    (is (= :unknown (:valid? result))
+        (pr-str result))
+    (is (zero? (:read-count result)))))
+
 (deftest bank-client-transfer-smoke-test
   (let [cluster-id (str (UUID/randomUUID))
         test-map {:db-name "bank-smoke"

@@ -3255,8 +3255,21 @@
   HA follower replay writes raw giant rows directly into LMDB, so the cursor
   must be kept in sync without reopening the store."
   [^Store store next-gt]
-  (loop [current (long (max-gt store))
-         target (long next-gt)]
-    (if (< current target)
-      (recur (long (advance-max-gt store)) target)
-      current)))
+  (locking (.-write-txn store)
+    (loop [current (long (max-gt store))
+           target (long next-gt)]
+      (if (< current target)
+        (recur (long (advance-max-gt store)) target)
+        current))))
+
+(defn sync-max-tx-floor!
+  "Advance an open store's in-memory transaction cursor to at least `next-tx`.
+  HA replay can materialize durable metadata through raw KV rows, bypassing the
+  normal local transaction path that advances this volatile cursor."
+  [^Store store next-tx]
+  (locking (.-write-txn store)
+    (loop [current (long (max-tx store))
+           target (long next-tx)]
+      (if (< current target)
+        (recur (long (.advance-max-tx store)) target)
+        current))))

@@ -5,8 +5,14 @@
    [datalevin.constants :as c]
    [datalevin.core :as d]
    [datalevin.datom :as dd]
-   [datalevin.test.core :refer [server-fixture]])
+   [datalevin.interface :as i]
+   [datalevin.kv :as kv]
+   [datalevin.server.handlers :as handlers]
+   [datalevin.storage :as st]
+   [datalevin.test.core :refer [server-fixture]]
+   [datalevin.util :as u])
   (:import
+   [datalevin.storage Store]
    [java.util UUID]))
 
 (use-fixtures :each server-fixture)
@@ -59,6 +65,25 @@
         (is (true? (get-in response [:err-data :indeterminate?]))))
       (finally
         (cl/disconnect client)))))
+
+(deftest remote-read-floor-uses-durable-max-tx-test
+  (let [dir   (u/tmp-dir
+               (str "remote-read-floor-durable-" (UUID/randomUUID)))
+        store (st/open dir nil {:db-name "remote-read-floor-durable"
+                                :wal? true})]
+    (try
+      (let [lmdb (kv/raw-lmdb (.-lmdb ^Store store))]
+        (let [store-max-tx (long (i/max-tx store))
+              durable-max-tx (+ store-max-tx 6)]
+          (i/transact-kv lmdb c/meta [[:put :max-tx durable-max-tx]]
+                         :attr :long)
+          (is (= store-max-tx (long (i/max-tx store))))
+          (is (= durable-max-tx
+                 (#'handlers/durable-dt-store-max-tx store)))
+          (is (= durable-max-tx (long (i/max-tx store))))))
+      (finally
+        (i/close store)
+        (u/delete-files dir)))))
 
 (deftest remote-assoc-opt-requires-alter-permission-test
   (let [db-name       (str "remote-assoc-opt-auth-" (UUID/randomUUID))

@@ -281,8 +281,9 @@
                                        :error reason
                                        :balances balances})))
                                  vec)]
-          {:valid? (and (seq successful-reads)
-                        (empty? invalid-reads))
+          {:valid? (if (seq successful-reads)
+                     (empty? invalid-reads)
+                     :unknown)
            :read-count (count successful-reads)
            :invalid-count (count invalid-reads)
            :invalid-samples (vec (take 10 invalid-reads))
