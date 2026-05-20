@@ -18,8 +18,21 @@
    [datalevin.util :as u])
   (:import
    [java.util Arrays]
-   [datalevin.parser Predicate]
+   [datalevin.parser Predicate SrcVar]
    [datalevin.utl LikeFSM]))
+
+(defn- source-form?
+  [form]
+  (cond
+    (instance? SrcVar form) true
+    (qu/quoted-form? form) false
+    (qu/source? form)      true
+    (map? form)            (some (fn [[k v]]
+                                   (or (source-form? k)
+                                       (source-form? v)))
+                                 form)
+    (coll? form)           (some source-form? form)
+    :else                  false))
 
 (defn- pushdownable
   "Predicates that can be pushed down involve only one free variable."
@@ -27,7 +40,8 @@
   (when (instance? Predicate where)
     (let [{:keys [args]} where
           syms           (qu/collect-vars args)]
-      (when (= (count syms) 1)
+      (when (and (= (count syms) 1)
+                 (not (source-form? args)))
         (let [s (first syms)]
           (some #(when (= s (:var %)) s) gseq))))))
 

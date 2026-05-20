@@ -567,7 +567,9 @@
       (DatalogStore. uri db-name active-client active-client
                      (volatile! :remote-dl-mutex) true
                      open-db-info
-                     read-floor-tx
+                     (AtomicLong. (long (or (current-read-floor-tx
+                                               read-floor-tx)
+                                             0)))
                      sampling-started?
                      owns-client?
                      closed?)))

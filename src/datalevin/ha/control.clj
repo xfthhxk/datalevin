@@ -1863,15 +1863,15 @@
      (let [{:keys [group-id running-v]} authority]
        (ensure-running! running-v)
        (lease/validate-lease-key! group-id db-identity)
-	       (let [snapshot (await-read-state-barrier-compat!
-	                       authority
-	                       timeout-ms)
-	             {:keys [lease version]} (lease-entry snapshot db-identity)]
-	         {:lease lease
-	          :version version
-	          :authority-now-ms nil
-	          :membership-hash (:membership-hash snapshot)
-	          :voters (:voters snapshot)}))
+       (let [snapshot (await-read-state-barrier-compat!
+                       authority
+                       timeout-ms)
+             {:keys [lease version]} (lease-entry snapshot db-identity)]
+         {:lease lease
+          :version version
+          :authority-now-ms (long (control-now-ms))
+          :membership-hash (:membership-hash snapshot)
+          :voters (:voters snapshot)}))
 
      (satisfies? ILeaseAuthority authority)
      (let [{:keys [lease version]} (read-lease authority db-identity)]

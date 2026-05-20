@@ -315,6 +315,14 @@
       materialized-lsn
       watermark-lsn)))
 
+(defn- ha-local-materialized-data-lsn
+  [role watermark-lsn snapshot-lsn payload-lsn]
+  (long (if (= :leader role)
+          (long-max3 watermark-lsn snapshot-lsn payload-lsn)
+          (ha-follower-data-lsn-ceiling watermark-lsn
+                                        snapshot-lsn
+                                        payload-lsn))))
+
 (defn- cap-follower-lsn-to-authority
   [m lsn]
   (let [lsn (long (or lsn 0))
@@ -338,19 +346,17 @@
      :payload-lsn payload-lsn
      :ceiling-lsn (cap-follower-lsn-to-authority
                    m
-                   (long (if (= :leader role)
-                           (long-max3 watermark-lsn snapshot-lsn payload-lsn)
-                           (ha-follower-data-lsn-ceiling watermark-lsn
-                                                         snapshot-lsn
-                                                         payload-lsn))))}))
+                   (ha-local-materialized-data-lsn role
+                                                   watermark-lsn
+                                                   snapshot-lsn
+                                                   payload-lsn))}))
 
 (defn- ha-clamped-follower-floor-lsn
   [persisted-lsn _snapshot-lsn ceiling-lsn]
   (let [tracked-lsn (long persisted-lsn)]
-    (if (pos? (long ceiling-lsn))
-      (if (pos? tracked-lsn)
-        (long-min2 ceiling-lsn tracked-lsn)
-        ceiling-lsn)
+    (if (and (pos? tracked-lsn)
+             (pos? (long ceiling-lsn)))
+      (long-min2 ceiling-lsn tracked-lsn)
       tracked-lsn)))
 
 (defn- read-ha-local-watermark-lsn*
@@ -373,14 +379,10 @@
         persisted-lsn (long (read-ha-local-persisted-lsn kv-store))
         ceiling-lsn (cap-follower-lsn-to-authority
                      m
-                     (long (if (= :leader role)
-                             (long-max3 watermark-lsn
-                                        snapshot-lsn
-                                        payload-lsn)
-                             (ha-follower-data-lsn-ceiling
-                              watermark-lsn
-                              snapshot-lsn
-                              payload-lsn))))
+                     (ha-local-materialized-data-lsn role
+                                                     watermark-lsn
+                                                     snapshot-lsn
+                                                     payload-lsn))
         follower-floor-lsn
         (ha-clamped-follower-floor-lsn
          persisted-lsn snapshot-lsn ceiling-lsn)
@@ -395,8 +397,7 @@
         replayed-follower-lsn
         (if (integer? tracked-follower-applied-lsn)
           (long-max2 follower-floor-lsn
-                     (long-min2 state-lsn
-                                tracked-follower-applied-lsn))
+                     tracked-follower-applied-lsn)
           follower-floor-lsn)
         local-last-applied-lsn
         (long (if (= :leader role)
@@ -465,23 +466,18 @@
 (defn persist-ha-runtime-local-applied-lsn!
   [m]
   (with-ha-local-store-read
-    #(when-let [kv-store (local-kv-store m)]
-       (let [{:keys [ceiling-lsn]} (ha-local-data-lsn-ceiling m kv-store)
-             persisted-lsn (long (read-ha-local-persisted-lsn kv-store))
-             state-lsn (long (or (:ha-local-last-applied-lsn m) 0))
-             lease-lsn (long (or (get-in m
-                                         [:ha-authority-lease
-                                          :leader-last-applied-lsn])
-                                 0))
-             target-lsn (long (if (= :leader (:ha-role m))
-                                (long-max2 persisted-lsn lease-lsn)
-                                (long-max2 persisted-lsn state-lsn)))
-             applied-lsn (long (if (pos? (long ceiling-lsn))
-                                 (long-min2 ceiling-lsn target-lsn)
-                                 target-lsn))]
-         (when (> applied-lsn persisted-lsn)
-           (persist-ha-local-applied-lsn! m applied-lsn))
-         applied-lsn))))
+    #(when (not= :leader (:ha-role m))
+       (when-let [kv-store (local-kv-store m)]
+         (let [{:keys [ceiling-lsn]} (ha-local-data-lsn-ceiling m kv-store)
+               persisted-lsn (long (read-ha-local-persisted-lsn kv-store))
+               state-lsn (long (or (:ha-local-last-applied-lsn m) 0))
+               target-lsn (long-max2 persisted-lsn state-lsn)
+               applied-lsn (long (if (pos? (long ceiling-lsn))
+                                   (long-min2 ceiling-lsn target-lsn)
+                                   target-lsn))]
+           (when (> applied-lsn persisted-lsn)
+             (persist-ha-local-applied-lsn! m applied-lsn))
+           applied-lsn)))))
 
 (defn ha-local-last-applied-lsn
   [m]
@@ -517,8 +513,13 @@
     #(let [state-lsn (long (or (:ha-local-last-applied-lsn m) 0))]
        (try
          (if-let [kv-store (local-kv-store m)]
-           (:local-last-applied-lsn
-            (fresh-ha-local-watermark-snapshot m kv-store))
+           (let [materialized-lsn
+                 (ha-local-materialized-data-lsn
+                  (:ha-role m)
+                  (read-ha-local-watermark-lsn* kv-store)
+                  (read-ha-local-snapshot-current-lsn kv-store)
+                  (read-ha-local-payload-lsn kv-store))]
+             (long-max2 state-lsn materialized-lsn))
            (if (and (bootstrap-empty-lease? observed-lease)
                     (zero? state-lsn))
              (long-max2 state-lsn (read-ha-local-watermark-lsn m))

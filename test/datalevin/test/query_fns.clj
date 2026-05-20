@@ -597,6 +597,32 @@
                     [(missing? $ ?e :height)]] db)
              #{[1 15] [3 37]})))
 
+    (testing "missing? on ref-joined value"
+      (let [dir2 (u/tmp-dir (str "query-missing-ref-" (UUID/randomUUID)))
+            db2  (-> (d/empty-db dir2 {:thingB/buddy
+                                        {:db/valueType :db.type/ref}})
+                     (d/db-with
+                       [{:db/id 1
+                         :thingA/attr "yes"
+                         :thingA/present "always"}
+                        {:db/id 2
+                         :thingB/buddy 1}
+                        {:db/id 3
+                         :thingA/present "always"}
+                        {:db/id 4
+                         :thingB/buddy 3}]))]
+        (try
+          (is (= (d/q '[:find ?b
+                        :in $
+                        :where
+                        [?b :thingB/buddy ?a]
+                        [(missing? $ ?a :thingA/attr)]]
+                      db2)
+                 #{[4]}))
+          (finally
+            (d/close-db db2)
+            (u/delete-files dir2)))))
+
     (testing "missing? back-ref"
       (is (= (d/q '[:find ?e
                     :in $

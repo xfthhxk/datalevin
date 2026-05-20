@@ -400,6 +400,95 @@
       (finally
         (u/delete-files dir)))))
 
+(deftest follower-local-applied-lsn-ignores-untracked-payload-floor-test
+  (let [dir (u/tmp-dir (str "ha-follower-untracked-payload-floor-test-"
+                            (UUID/randomUUID)))]
+    (try
+      (let [db (d/open-kv dir {:wal? true})]
+        (try
+          (d/open-dbi db "a")
+          (dotimes [i 5]
+            (is (= :transacted
+                   (d/transact-kv db [[:put "a" i i]]))))
+          (is (pos? (long (or (i/get-value (kv/raw-lmdb db)
+                                           c/kv-info
+                                           c/wal-local-payload-lsn
+                                           :keyword
+                                           :data)
+                              0))))
+          ;; A former leader can restart as a follower with local payload markers
+          ;; from its own old term. Without a follower replay cursor or persisted
+          ;; follower floor, those markers must not skip same-numbered remote LSNs.
+          (let [m {:ha-role :follower
+                   :store db}]
+            (is (= 0 (store/read-ha-local-last-applied-lsn m)))
+            (is (= 0 (store/ha-local-last-applied-lsn m))))
+          (finally
+            (d/close-kv db))))
+      (finally
+        (u/delete-files dir)))))
+
+(deftest promotion-local-lsn-trusts-materialized-data-test
+  (let [dir (u/tmp-dir (str "ha-promotion-local-materialized-test-"
+                            (UUID/randomUUID)))]
+    (try
+      (let [db (d/open-kv dir {:wal? true})]
+        (try
+          (d/open-dbi db "a")
+          (dotimes [i 5]
+            (is (= :transacted
+                   (d/transact-kv db [[:put "a" i i]]))))
+          (let [payload-lsn (long (i/get-value (kv/raw-lmdb db)
+                                               c/kv-info
+                                               c/wal-local-payload-lsn
+                                               :keyword
+                                               :data))
+                m {:ha-role :follower
+                   :store db
+                   :ha-authority-lease
+                   {:leader-last-applied-lsn payload-lsn}}]
+            ;; Follower replay still requires a follower cursor or persisted
+            ;; follower floor, but promotion lag checks must not forget local
+            ;; materialized data after a leader demotes to follower.
+            (is (= 0 (store/read-ha-local-last-applied-lsn m)))
+            (is (= payload-lsn
+                   (store/fresh-ha-promotion-local-last-applied-lsn
+                    m
+                    (:ha-authority-lease m)))))
+          (finally
+            (d/close-kv db))))
+      (finally
+        (u/delete-files dir)))))
+
+(deftest follower-local-applied-lsn-trusts-replay-cursor-over-stale-state-test
+  (let [dir (u/tmp-dir (str "ha-follower-replay-cursor-floor-test-"
+                            (UUID/randomUUID)))]
+    (try
+      (let [db (d/open-kv dir {:wal? true})]
+        (try
+          (d/open-dbi db "a")
+          (dotimes [i 10]
+            (is (= :transacted
+                   (d/transact-kv db [[:put "a" i i]]))))
+          (i/transact-kv (kv/raw-lmdb db)
+                         c/kv-info
+                         [[:put c/wal-local-payload-lsn 10]]
+                         :keyword
+                         :data)
+          ;; The follower replay cursor is advanced only after materialization.
+          ;; A later watermark refresh must not lower the floor to an older
+          ;; transient state value.
+          (let [m {:ha-role :follower
+                   :store db
+                   :ha-local-last-applied-lsn 7
+                   :ha-follower-next-lsn 11}]
+            (is (= 10 (store/read-ha-local-last-applied-lsn m)))
+            (is (= 10 (store/ha-local-last-applied-lsn m))))
+          (finally
+            (d/close-kv db))))
+      (finally
+        (u/delete-files dir)))))
+
 (deftest follower-local-applied-lsn-ignores-snapshot-retention-floor-test
   (let [dir (u/tmp-dir (str "ha-follower-snapshot-retention-floor-test-"
                             (UUID/randomUUID)))]
@@ -421,6 +510,42 @@
                    :ha-follower-next-lsn 17}]
             (is (= 8 (store/read-ha-local-last-applied-lsn m)))
             (is (= 8 (store/ha-local-last-applied-lsn m))))
+          (finally
+            (d/close-kv db))))
+      (finally
+        (u/delete-files dir)))))
+
+(deftest leader-shutdown-does-not-persist-follower-local-floor-test
+  (let [dir (u/tmp-dir (str "ha-leader-shutdown-local-floor-test-"
+                            (UUID/randomUUID)))]
+    (try
+      (let [db (d/open-kv dir {:wal? true})]
+        (try
+          (d/open-dbi db "a")
+          (dotimes [i 5]
+            (is (= :transacted
+                   (d/transact-kv db [[:put "a" i i]]))))
+          (let [payload-lsn (long (i/get-value (kv/raw-lmdb db)
+                                               c/kv-info
+                                               c/wal-local-payload-lsn
+                                               :keyword
+                                               :data))
+                m {:ha-role :leader
+                   :store db
+                   :ha-local-last-applied-lsn payload-lsn
+                   :ha-authority-lease
+                   {:leader-last-applied-lsn payload-lsn}}]
+            (is (nil? (i/get-value (kv/raw-lmdb db)
+                                   c/kv-info
+                                   c/ha-local-applied-lsn
+                                   :keyword
+                                   :data)))
+            (is (nil? (store/persist-ha-runtime-local-applied-lsn! m)))
+            (is (nil? (i/get-value (kv/raw-lmdb db)
+                                   c/kv-info
+                                   c/ha-local-applied-lsn
+                                   :keyword
+                                   :data))))
           (finally
             (d/close-kv db))))
       (finally
