@@ -5,6 +5,7 @@
    [datalevin.jepsen.workload.identity-upsert :as identity-upsert]
    [datalevin.jepsen.workload.index-consistency :as index-consistency]
    [datalevin.jepsen.workload.internal :as internal]
+   [datalevin.jepsen.workload.register :as register]
    [datalevin.jepsen.workload.tx-fn-register :as tx-fn-register]
    [datalevin.jepsen.workload.util :as workload.util]
    [datalevin.jepsen.local :as local]
@@ -84,6 +85,38 @@
                  (fn [conn]
                    [:ok conn]))))
         (is (= 2 @attempts))))))
+
+(deftest register-initialization-retries-transient-ha-error-test
+  (let [attempts             (atom 0)
+        initialized-clusters @#'register/initialized-clusters]
+    (reset! initialized-clusters #{})
+    (try
+      (with-redefs [local/transport-failure? (constantly false)
+                    local/workload-setup-timeout-ms (fn
+                                                      ([_cluster-id]
+                                                       1000)
+                                                      ([_cluster-id _default-timeout-ms]
+                                                       1000))
+                    local/cluster-state (fn [_cluster-id]
+                                          {:live-nodes ["n1"]})
+                    local/local-query (fn [_cluster-id _logical-node _query]
+                                        [[0 0]])]
+        (binding [workload.util/*with-leader-conn*
+                  (fn [_test _schema _f]
+                    (if (= 1 (swap! attempts inc))
+                      (throw (ex-info
+                               "Request to Datalevin server failed: \"HA write admission rejected\""
+                               {:error :ha/write-rejected
+                                :retryable? true}))
+                      :seeded))]
+          (#'register/ensure-registers-initialized!
+           {:datalevin/cluster-id ::register-retry
+            :db-name "register-retry"}
+           1)))
+      (is (= 2 @attempts))
+      (is (contains? @initialized-clusters ::register-retry))
+      (finally
+        (reset! initialized-clusters #{})))))
 
 (deftest history-safe-bounds-unbounded-collections-test
   (let [result (workload.util/history-safe {:values (range)})
