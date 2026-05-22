@@ -1403,60 +1403,64 @@
           "Don't have permission to open database"
         (require-control-for-privileged-server-options! permissions opts)
         (locking (db-open-lock server db-name)
-          (let [dir              (db-dir (.-root server) db-name)
-                existing-db-now? (db-exists? server db-name)
-                db-type          (effective-db-type
-                                   server db-name requested-db-type)
-                activate-runtime? (activate-runtime-on-open?
-                                    requested-db-type db-type)
-                store            (or (some-> (get-store server db-name)
-                                             (reusable-store-for-db-type
-                                               schema db-type))
-                                     (try
-                                       (case db-type
-                                         :datalog   (do
-                                                      (dha/recover-ha-local-store-dir-if-needed! dir)
-                                                      (st/open dir schema opts))
-                                         :key-value (ensure-ha-client-op-dbi-open!
-                                                      (l/open-kv dir opts)))
-                                       (catch Exception e
-                                         (if (multiple-lmdb-open-error? e)
-                                           (or (await-reusable-store
-                                                server db-name schema db-type)
-                                               (throw e))
-                                           (throw e)))))
-                store            (try
-                                   (add-store
-                                     server db-name store activate-runtime? opts)
-                                   (catch Throwable t
-                                     (when (and (some? store)
-                                                (not (store-closed? store)))
-                                       (close-store store))
-                                     (throw t)))
-                 datalog?         (instance? Store store)
-                 consensus-ha?    (and datalog?
-                                       (some? (*consensus-ha-opts-fn* store)))]
-            (update-client server client-id
-                           #(cond-> %
-                              true     (update :stores assoc db-name
-                                               {:datalog? datalog?
-                                                :dbis     #{}
-                                                :consensus-ha? consensus-ha?})
-                              (and datalog? activate-runtime?)
-                              (update :dt-dbs conj db-name)))
-            (when-not existing-db-now?
-              (transact-new-db sys-conn username db-type db-name)
-              (update-client server client-id
-                             #(assoc % :permissions
-                                     (user-permissions sys-conn username))))
-            (let [db-info (when (and return-db-info? datalog?)
-                            (assoc (fresh-runtime-db-info store)
-                                   :opts (i/opts store)))]
-              (when respond?
-                (write-message skey
-                               (cond-> {:type :command-complete}
-                                 db-info (assoc :result db-info))))
-              db-info)))))))
+          (with-db-runtime-store-swap
+            server
+            db-name
+            (fn []
+              (let [dir              (db-dir (.-root server) db-name)
+                    existing-db-now? (db-exists? server db-name)
+                    db-type          (effective-db-type
+                                       server db-name requested-db-type)
+                    activate-runtime? (activate-runtime-on-open?
+                                        requested-db-type db-type)
+                    store            (or (some-> (get-store server db-name)
+                                                 (reusable-store-for-db-type
+                                                   schema db-type))
+                                         (try
+                                           (case db-type
+                                             :datalog   (do
+                                                          (dha/recover-ha-local-store-dir-if-needed! dir)
+                                                          (st/open dir schema opts))
+                                             :key-value (ensure-ha-client-op-dbi-open!
+                                                          (l/open-kv dir opts)))
+                                           (catch Exception e
+                                             (if (multiple-lmdb-open-error? e)
+                                               (or (await-reusable-store
+                                                    server db-name schema db-type)
+                                                   (throw e))
+                                               (throw e)))))
+                    store            (try
+                                       (add-store
+                                         server db-name store activate-runtime? opts)
+                                       (catch Throwable t
+                                         (when (and (some? store)
+                                                    (not (store-closed? store)))
+                                           (close-store store))
+                                         (throw t)))
+                    datalog?         (instance? Store store)
+                    consensus-ha?    (and datalog?
+                                          (some? (*consensus-ha-opts-fn* store)))]
+                (update-client server client-id
+                               #(cond-> %
+                                  true     (update :stores assoc db-name
+                                                   {:datalog? datalog?
+                                                    :dbis     #{}
+                                                    :consensus-ha? consensus-ha?})
+                                  (and datalog? activate-runtime?)
+                                  (update :dt-dbs conj db-name)))
+                (when-not existing-db-now?
+                  (transact-new-db sys-conn username db-type db-name)
+                  (update-client server client-id
+                                 #(assoc % :permissions
+                                         (user-permissions sys-conn username))))
+                (let [db-info (when (and return-db-info? datalog?)
+                                (assoc (fresh-runtime-db-info store)
+                                       :opts (i/opts store)))]
+                  (when respond?
+                    (write-message skey
+                                   (cond-> {:type :command-complete}
+                                     db-info (assoc :result db-info))))
+                  db-info)))))))))
 
 (defn- session-lmdb [sys-conn] (sess/session-lmdb sys-conn))
 

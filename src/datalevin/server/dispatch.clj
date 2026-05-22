@@ -214,8 +214,13 @@
   ;; `:copy` takes a narrower source-store read lock in its handler while it
   ;; performs the LMDB snapshot copy. The generic guard would also cover the
   ;; response file transfer, delaying shutdown longer than necessary.
+  ;;
+  ;; `:open` and `:open-kv` publish the live store from `open-server-store`,
+  ;; which takes the runtime-store write lock around that mutation.
   #{:close-database
-    :copy})
+    :copy
+    :open
+    :open-kv})
 
 (defn- runtime-read-access-message?
   [{:keys [type writing?]}]
