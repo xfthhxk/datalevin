@@ -6,7 +6,8 @@
    [datalevin.jepsen.local :as local]
    [datalevin.jepsen.workload.util :as workload.util]
    [jepsen.checker :as checker]
-   [jepsen.client :as client]))
+   [jepsen.client :as client]
+   [taoensso.timbre :as log]))
 
 (def schema
   {:bank/id {:db/valueType :db.type/long
@@ -179,12 +180,15 @@
             (recur snapshot))
 
           :else
-          (throw (ex-info "Timed out waiting for bank seed state on live nodes"
-                          {:cluster-id cluster-id
-                           :timeout-ms timeout-ms
-                           :expected-balances expected-balances
-                           :snapshot snapshot
-                           :previous-snapshot last-snapshot})))))))
+          (let [data {:cluster-id cluster-id
+                      :timeout-ms timeout-ms
+                      :expected-balances expected-balances
+                      :snapshot snapshot
+                      :previous-snapshot last-snapshot}]
+            (log/warn "Timed out waiting for bank seed state on live nodes"
+                      data)
+            (throw (ex-info "Timed out waiting for bank seed state on live nodes"
+                            data))))))))
 
 (defn- ensure-bank-initialized!
   [test account-count initial-balance]

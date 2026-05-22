@@ -370,6 +370,7 @@
           (fn []
             (try
               (close-ha-local-store! m)
+              (st/retire-shared-local-store! env-dir)
               (when (u/file-exists backup-dir)
                 (u/delete-files backup-dir))
               (when (u/file-exists stage-dir)

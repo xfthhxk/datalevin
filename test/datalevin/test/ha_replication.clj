@@ -283,6 +283,59 @@
       (finally
         (u/delete-files dir)))))
 
+(defn- write-ha-marker-lsns!
+  [store snapshot-lsn payload-lsn]
+  (let [lmdb (.-lmdb ^Store store)]
+    (i/transact-kv lmdb
+                   c/kv-info
+                   [[:put c/wal-snapshot-current-lsn (long snapshot-lsn)]
+                    [:put c/wal-local-payload-lsn (long payload-lsn)]]
+                   :keyword
+                   :data)))
+
+(defn- read-ha-snapshot-lsn
+  [store]
+  (let [lmdb (.-lmdb ^Store store)]
+    (long (or (i/get-value lmdb
+                           c/kv-info
+                           c/wal-snapshot-current-lsn
+                           :keyword
+                           :data)
+              0))))
+
+(deftest snapshot-install-reopens-replaced-store-with-stale-shared-wrapper-test
+  (let [env-dir      (u/tmp-dir (str "ha-install-target-"
+                                     (UUID/randomUUID)))
+        snapshot-dir (u/tmp-dir (str "ha-install-source-"
+                                     (UUID/randomUUID)))
+        opts         {:db-name "ha-install-shared-wrapper"
+                      :db-identity "db-install-shared-wrapper"
+                      :wal? true
+                      :snapshot-scheduler? false}
+        target-store (st/open env-dir nil opts)
+        shared-store (st/open env-dir nil opts)
+        source-store (st/open snapshot-dir nil opts)]
+    (try
+      (write-ha-marker-lsns! target-store 3 10)
+      (write-ha-marker-lsns! source-store 18 18)
+      (i/close source-store)
+      (let [result (boot/install-ha-local-snapshot!
+                    {:store target-store
+                     :ha-db-identity "db-install-shared-wrapper"}
+                    snapshot-dir)
+            installed-store (get-in result [:state :store])]
+        (is (true? (:ok? result)))
+        (is (= 18 (read-ha-snapshot-lsn installed-store)))
+        (is (true? (i/closed? shared-store)))
+        (i/close installed-store))
+      (finally
+        (when-not (i/closed? shared-store)
+          (i/close shared-store))
+        (when-not (i/closed? target-store)
+          (i/close target-store))
+        (u/delete-files env-dir)
+        (u/delete-files snapshot-dir)))))
+
 (deftest bootstrap-tail-clamps-to-contiguous-materialized-prefix-test
   (let [dir (u/tmp-dir (str "ha-bootstrap-tail-test-" (UUID/randomUUID)))]
     (try
