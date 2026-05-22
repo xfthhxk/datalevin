@@ -3250,6 +3250,18 @@
         :close))
     :close))
 
+(defn retire-shared-local-store!
+  "Remove and close any shared local Store registered for dir."
+  [dir]
+  (when-let [dir-key (shared-local-store-key dir)]
+    (when-let [^Store store (locking shared-local-stores
+                              (let [store (get-in @shared-local-stores
+                                                  [dir-key :store])]
+                                (swap! shared-local-stores dissoc dir-key)
+                                store))]
+      (when-not (closed? store)
+        (datalevin.interface/close store)))))
+
 (defn sync-max-gt-floor!
   "Advance an open store's in-memory giant-id cursor to at least `next-gt`.
   HA follower replay writes raw giant rows directly into LMDB, so the cursor
