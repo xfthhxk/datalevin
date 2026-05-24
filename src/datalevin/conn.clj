@@ -250,51 +250,52 @@
               (transact! cn [{:db/id 1 :counter (inc now)}])
               (q query @cn 1))) "
   [[conn orig-conn] & body]
-  `(locking ~orig-conn
-     (let [db#  ^DB (deref ~orig-conn)
-           s#   (.-store db#)
-           old# (db/cache-disabled? s#)]
-       (db/disable-cache s#)
-       (try
-         (if (instance? DatalogStore s#)
-           (locking (l/write-txn s#)
-             (let [res#    (if (l/writing? s#)
-                             (let [~conn ~orig-conn]
-                               ~@body)
-                             (let [s1# (r/open-transact s#)
-                                   w#  #(let [~conn
-                                              (atom (db/transfer db# s1#)
-                                                    :meta (meta ~orig-conn))]
-                                          ~@body)]
-                               (try
-                                 (let [res# (u/repeat-try-catch
-                                             ~c/+in-tx-overflow-times+
-                                             l/resized? (w#))]
-                                   (r/close-transact s#)
-                                   res#)
-                                 (catch Throwable t#
-                                   (abort-open-datalog-transaction! s# t#)
-                                   (throw t#)))))
-                   new-db# (db/carry-runtime-opts (db/new-db s#) db#)]
-               (reset! ~orig-conn new-db#)
-               res#))
-           (let [kv#     (.-lmdb ^Store s#)
-                 s1#     (volatile! nil)
-                 res1#   (l/with-transaction-kv [kv1# kv#]
-                           (let [conn1# (atom (db/transfer
-                                                db# (s/transfer s# kv1#))
-                                              :meta (meta ~orig-conn))
-                                 res#   (let [~conn conn1#]
-                                          ~@body)]
-                             (vreset! s1# (.-store ^DB (deref conn1#)))
-                             res#))
-                 new-s#  (s/transfer (deref s1#) kv#)
-                 new-db# (db/carry-runtime-opts (db/new-db new-s#) db#)]
-             (reset! ~orig-conn new-db#)
-             res1#))
-         (finally
-           (when-not old#
-             (db/enable-cache (.-store ^DB (deref ~orig-conn)))))))))
+  `(let [orig-conn# ~orig-conn]
+     (locking orig-conn#
+       (let [db#  ^DB (deref orig-conn#)
+             s#   (.-store db#)
+             old# (db/cache-disabled? s#)]
+         (db/disable-cache s#)
+         (try
+           (if (instance? DatalogStore s#)
+             (locking (l/write-txn s#)
+               (let [res#    (if (l/writing? s#)
+                               (let [~conn orig-conn#]
+                                 ~@body)
+                               (let [s1# (r/open-transact s#)
+                                     w#  #(let [~conn
+                                                (atom (db/transfer db# s1#)
+                                                      :meta (meta orig-conn#))]
+                                            ~@body)]
+                                 (try
+                                   (let [res# (u/repeat-try-catch
+                                               ~c/+in-tx-overflow-times+
+                                               l/resized? (w#))]
+                                     (r/close-transact s#)
+                                     res#)
+                                   (catch Throwable t#
+                                     (abort-open-datalog-transaction! s# t#)
+                                     (throw t#)))))
+                     new-db# (db/carry-runtime-opts (db/new-db s#) db#)]
+                 (reset! orig-conn# new-db#)
+                 res#))
+             (let [kv#     (.-lmdb ^Store s#)
+                   s1#     (volatile! nil)
+                   res1#   (l/with-transaction-kv [kv1# kv#]
+                             (let [conn1# (atom (db/transfer
+                                                  db# (s/transfer s# kv1#))
+                                                :meta (meta orig-conn#))
+                                   res#   (let [~conn conn1#]
+                                            ~@body)]
+                               (vreset! s1# (.-store ^DB (deref conn1#)))
+                               res#))
+                   new-s#  (s/transfer (deref s1#) kv#)
+                   new-db# (db/carry-runtime-opts (db/new-db new-s#) db#)]
+               (reset! orig-conn# new-db#)
+               res1#))
+           (finally
+             (when-not old#
+               (db/enable-cache (.-store ^DB (deref orig-conn#))))))))))
 
 (defn with
   ([db tx-data] (with db tx-data {} false))

@@ -396,31 +396,32 @@
               (transact-kv kv [[:put \"a\" :counter (inc now)]])
               (get-value kv \"a\" :counter)))"
   [[db orig-db] & body]
-  `(locking (write-txn ~orig-db)
-     (let [writing#   (writing? ~orig-db)
-           opened?#   (volatile! false)
-           condition# (fn [~'e] (and (resized? ~'e) (not writing#)))]
-       (u/repeat-try-catch
-           ~c/+in-tx-overflow-times+
-           condition#
-         (try
-           (vreset! opened?# false)
-           (let [res# (let [~db (if writing#
-                                  ~orig-db
-                                  (let [db# (open-transact-kv ~orig-db)]
-                                    (vreset! opened?# true)
-                                    db#))]
-                        (u/repeat-try-catch
-                            ~c/+in-tx-overflow-times+
-                            condition#
-                          ~@body))]
-             (when (and (not writing#) @opened?#)
-               (close-transact-kv ~orig-db))
-             res#)
-           (catch Throwable t#
-             (when (and (not writing#) @opened?#)
-               (abort-open-transaction-kv! ~orig-db t#))
-             (throw t#)))))))
+  `(let [orig-db# ~orig-db]
+     (locking (write-txn orig-db#)
+       (let [writing#   (writing? orig-db#)
+             opened?#   (volatile! false)
+             condition# (fn [~'e] (and (resized? ~'e) (not writing#)))]
+         (u/repeat-try-catch
+             ~c/+in-tx-overflow-times+
+             condition#
+           (try
+             (vreset! opened?# false)
+             (let [res# (let [~db (if writing#
+                                    orig-db#
+                                    (let [db# (open-transact-kv orig-db#)]
+                                      (vreset! opened?# true)
+                                      db#))]
+                          (u/repeat-try-catch
+                              ~c/+in-tx-overflow-times+
+                              condition#
+                            ~@body))]
+               (when (and (not writing#) @opened?#)
+                 (close-transact-kv orig-db#))
+               res#)
+             (catch Throwable t#
+               (when (and (not writing#) @opened?#)
+                 (abort-open-transaction-kv! orig-db# t#))
+               (throw t#))))))))
 
 ;; for shutting down various executors when the last LMDB exits
 (defonce lmdb-dirs (atom #{}))

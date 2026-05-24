@@ -377,6 +377,29 @@
       (finally
         (u/delete-files dir)))))
 
+(deftest test-with-transaction-kv-evaluates-db-once
+  (let [dir (u/tmp-dir (str "with-tx-kv-eval-once-test-"
+                            (UUID/randomUUID)))]
+    (try
+      (let [db    (d/open-kv dir {:wal? false})
+            calls (atom 0)
+            get-db
+            (fn []
+              (swap! calls inc)
+              db)]
+        (try
+          (d/open-dbi db "a")
+          (is (= 1
+                 (d/with-transaction-kv [tx (get-db)]
+                   (d/transact-kv tx [[:put "a" :k 1]])
+                   (d/get-value tx "a" :k))))
+          (is (= 1 @calls))
+          (is (= 1 (d/get-value db "a" :k)))
+          (finally
+            (d/close-kv db))))
+      (finally
+        (u/delete-files dir)))))
+
 (deftest test-with-transaction-aborts-on-exception
   (let [dir    (u/tmp-dir (str "with-tx-abort-on-error-test-"
                                (UUID/randomUUID)))
@@ -399,6 +422,34 @@
                  (set (d/q '[:find [?e ...]
                              :where [?e :name "after"]]
                            @conn))))
+          (finally
+            (d/close conn))))
+      (finally
+        (u/delete-files dir)))))
+
+(deftest test-with-transaction-evaluates-conn-once
+  (let [dir    (u/tmp-dir (str "with-tx-eval-once-test-"
+                               (UUID/randomUUID)))
+        schema {:counter {:db/valueType :db.type/long}}]
+    (try
+      (let [conn  (d/create-conn dir schema {:wal? false})
+            calls (atom 0)
+            get-conn
+            (fn []
+              (swap! calls inc)
+              conn)]
+        (try
+          (is (= 1
+                 (d/with-transaction [tx (get-conn)]
+                   (d/transact! tx [{:db/id 1 :counter 1}])
+                   (d/q '[:find ?c .
+                          :where [1 :counter ?c]]
+                        @tx))))
+          (is (= 1 @calls))
+          (is (= 1
+                 (d/q '[:find ?c .
+                        :where [1 :counter ?c]]
+                      @conn)))
           (finally
             (d/close conn))))
       (finally
