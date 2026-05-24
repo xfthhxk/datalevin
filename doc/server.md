@@ -246,6 +246,92 @@ type: grant the user or role only `:datalevin.server/view` permission on the
 database, and do not grant `:datalevin.server/alter`,
 `:datalevin.server/create`, or `:datalevin.server/control`.
 
+#### Non-HA async read replicas
+
+Datalevin also supports asynchronous read-only replicas without enabling HA. This
+is for a simple topology with one primary writer server and one or more
+read-only replica servers. It does not provide automatic promotion, fencing,
+quorum, leader election, or write failover.
+
+The primary database must have WAL enabled. `:wal-durability-profile :strict` is
+recommended for the primary; the replica sync loop only tails records up to the
+source durable LSN.
+
+A replica is configured when the database is opened on the replica server:
+
+```clojure
+(require '[datalevin.core :as d]
+         '[datalevin.client :as cl])
+
+(def schema
+  {:name {:db/valueType :db.type/string
+          :db/cardinality :db.cardinality/one}})
+
+(def replica-conn
+  (d/create-conn
+   "dtlv://replica-admin:pass@replica-host:8898/app"
+   schema
+   {:replica/read-only? true
+    :replica/source "dtlv://replicator:pass@primary-host:8898/app"
+    :replica/id "xia-replica-us-west"
+    :replica/poll-ms 250
+    :replica/report-ms 5000
+    :wal? true
+    :wal-durability-profile :strict}))
+```
+
+The first open bootstraps the replica from the primary copy/snapshot interface
+when the local database does not exist. After that, the replica tails source WAL
+records from the next LSN, applies them locally in LSN order, and periodically
+reports its applied LSN back to the primary so WAL garbage collection keeps
+needed segments. If the local replica data directory already exists, it is not
+recopied; remove that local database directory to force a fresh bootstrap.
+
+Replica options:
+
+* `:replica/read-only? true`: enables non-HA replica mode.
+* `:replica/source`: required primary database URI.
+* `:replica/id`: stable identity used for primary WAL retention floors. If
+  omitted, a host/UUID value is generated.
+* `:replica/poll-ms`: source polling interval, default `250`.
+* `:replica/report-ms`: floor reporting interval, default `5000`.
+* `:replica/batch-records`: max WAL records fetched per sync batch, default
+  `256`.
+* `:replica/request-timeout-ms`: source request timeout, default `60000`.
+* `:replica/client-opts`: extra client options for the source connection.
+
+The user in `:replica/source` must be able to open/copy the primary database,
+read the tx log, and update the replica floor on the primary. In practice, grant
+that replicator user database `:datalevin.server/alter` permission. The user
+opening the local replica needs permission to create/open the database on the
+replica server.
+
+All normal read APIs work against the replica URI. All user writes are rejected
+by the replica server dispatch layer, even if the authenticated user otherwise
+has write permission:
+
+```clojure
+(d/q '[:find [?name ...] :where [?e :name ?name]] @replica-conn)
+
+;; Throws: Replica is read-only
+(d/transact! replica-conn [{:db/id -1 :name "blocked"}])
+```
+
+Replica status is available from the client:
+
+```clojure
+(def client
+  (cl/new-client "dtlv://replica-admin:pass@replica-host:8898"))
+
+(cl/replica-status client "app")
+```
+
+The returned map includes `:replica/read-only?`, `:replica/source`,
+`:replica/id`, `:replica-applied-lsn`, `:replica-source-durable-lsn`,
+`:replica-source-committed-lsn`, `:replica-lag-lsn`,
+`:replica-last-sync-ms`, `:replica-degraded-reason`, and
+`:replica-last-error`.
+
 #### Server idle session timeout
 
 CLI option `--idle-timeout` (default `172800000` ms, i.e. 48 hours) controls

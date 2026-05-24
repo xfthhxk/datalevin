@@ -36,6 +36,43 @@
     :close-transact-kv
     :abort-transact-kv})
 
+(def ^:private replica-extra-write-command-types
+  #{:drop-database
+    :assoc-opt
+    :force-txlog-sync!
+    :force-lmdb-sync!
+    :create-snapshot!
+    :gc-txlog-segments!
+    :txlog-update-snapshot-floor!
+    :txlog-clear-snapshot-floor!
+    :txlog-update-replica-floor!
+    :txlog-clear-replica-floor!
+    :txlog-pin-backup-floor!
+    :txlog-unpin-backup-floor!})
+
+(defn- replica-write-message?
+  [{:keys [type] :as message}]
+  (or (dha/ha-write-message? message)
+      (contains? replica-extra-write-command-types type)))
+
+(defn- message-db-name
+  [{:keys [args db-name]}]
+  (when-let [db-name (or db-name (nth args 0 nil))]
+    (if (string? db-name)
+      (u/lisp-case db-name)
+      db-name)))
+
+(defn- replica-read-only-error
+  [deps server message]
+  (let [db-name (message-db-name message)
+        m       (and db-name (get ((:dbs-fn deps) server) db-name))]
+    (when (and (:replica/read-only? m)
+               (replica-write-message? message))
+      {:error :replica/read-only
+       :db-name db-name
+       :type (:type message)
+       :message "Replica is read-only"})))
+
 (defn handle-accept
   [^SelectionKey skey]
   (when-let [client-socket (.accept ^ServerSocketChannel (.channel skey))]
@@ -284,13 +321,14 @@
                   ::handled)
                 message)))]
       (when-not (= ::handled message)
-        (do
-          (log/debug "Message received:" (dissoc message :password :args))
-          (set-last-active deps server skey)
+        (log/debug "Message received:" (dissoc message :password :args))
+        (set-last-active deps server skey)
+        (if-let [err (replica-read-only-error deps server message)]
+          (error-response skey "Replica is read-only" err)
           (if (:writing? message)
             (handle-writing deps server skey message)
             (let [dispatch! #(dispatch-message-with-ha-write-admission
-                              deps server skey message)]
+                                deps server skey message)]
               (if (runtime-read-access-message? message)
                 ((:with-db-runtime-read-access-fn deps)
                  server

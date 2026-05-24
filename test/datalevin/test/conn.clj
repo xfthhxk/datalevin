@@ -2,7 +2,7 @@
   (:require
    [clojure.string :as str]
    [datalevin.test.core :as tdc :refer [db-fixture]]
-   [clojure.test :refer [deftest testing is use-fixtures]]
+   [clojure.test :refer [deftest is use-fixtures]]
    [datalevin.binding.cpp :as cpp]
    [datalevin.conn :as dc]
    [datalevin.core :as d]

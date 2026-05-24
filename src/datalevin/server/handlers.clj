@@ -406,6 +406,23 @@
           skey
           (apply op store (rest args)))))))
 
+(defn- sampling-dt-handler
+  [op]
+  (fn [deps server skey {:keys [args writing?] :as message}]
+    (with-error
+      deps
+      skey
+      #(let [db-name (nth args 0)
+             m       ((:db-state deps) server db-name)]
+         (if (:replica/read-only? m)
+           (write-result! deps skey nil)
+           (let [store (dt-store deps server skey db-name writing?)]
+             (ensure-ha-read-floor! deps server db-name writing? message store)
+             (write-result!
+              deps
+              skey
+              (apply op store (rest args)))))))))
+
 (defn- normal-kv-handler
   [op]
   (fn [deps server skey {:keys [args writing?]}]
@@ -2277,6 +2294,41 @@
     deps skey
     #(sapi/datalog-re-index (api-deps deps) server skey {:args args})))
 
+(defn replica-status
+  [deps server skey {:keys [args] :as _message}]
+  (with-error
+    deps skey
+    #(let [db-name (u/lisp-case (nth args 0 nil))
+           m       ((:db-state deps) server db-name)]
+       (if m
+         (write-result!
+          deps skey
+          (assoc (select-keys
+                  m
+                  [:replica/read-only?
+                   :replica/source
+                   :replica/id
+                   :replica/poll-ms
+                   :replica/report-ms
+                   :replica/batch-records
+                   :replica-applied-lsn
+                   :replica-source-durable-lsn
+                   :replica-source-committed-lsn
+                   :replica-lag-lsn
+                   :replica-last-sync-ms
+                   :replica-last-status-ms
+                   :replica-last-floor-report-ms
+                   :replica-last-floor-reported-lsn
+                   :replica-degraded-reason
+                   :replica-last-error])
+                 :db-name db-name
+                 :replica-running?
+                 (boolean
+                  (some-> ^java.util.concurrent.atomic.AtomicBoolean
+                          (:replica-loop-running? m)
+                          .get))))
+         (u/raise "Database is not open" {:db-name db-name})))))
+
 (def handler-map
   {:authentication authentication
    :disconnect disconnect
@@ -2347,6 +2399,7 @@
    :txlog-clear-replica-floor! txlog-clear-replica-floor!
    :txlog-pin-backup-floor! txlog-pin-backup-floor!
    :txlog-unpin-backup-floor! txlog-unpin-backup-floor!
+   :replica-status replica-status
    :fetch (normal-dt-handler i/fetch)
    :populated? (normal-dt-handler i/populated?)
    :size (normal-dt-handler i/size)
@@ -2354,8 +2407,8 @@
    :tail (normal-dt-handler i/tail)
    :slice (copying-dt-handler i/slice)
    :rslice (copying-dt-handler i/rslice)
-   :start-sampling (normal-dt-handler i/start-sampling)
-   :stop-sampling (normal-dt-handler i/stop-sampling)
+   :start-sampling (sampling-dt-handler i/start-sampling)
+   :stop-sampling (sampling-dt-handler i/stop-sampling)
    :analyze (normal-dt-handler i/analyze)
    :e-datoms (copying-dt-handler i/e-datoms)
    :e-first-datom (normal-dt-handler i/e-first-datom)

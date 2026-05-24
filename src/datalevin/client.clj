@@ -1499,6 +1499,11 @@
   [client]
   (normal-request client :list-databases []))
 
+(defn replica-status
+  "Return async read-replica status for an open database."
+  [client db-name]
+  (normal-request client :replica-status [db-name]))
+
 (defn list-databases-in-use
   "List databases that are in use."
   [client]

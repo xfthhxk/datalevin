@@ -33,6 +33,7 @@
    [datalevin.server.session :as sess]
    [datalevin.txlog :as txlog]
    [datalevin.kv :as kv]
+   [datalevin.replica :as replica]
    [datalevin.constants :as c]
    [datalevin.interface :as i]
    [taoensso.timbre :as log]
@@ -719,10 +720,219 @@
   [m]
   (sha/stop-ha-follower-sync-loop m))
 
+(defn- store-open-opts
+  [store]
+  (cond
+    (instance? IStore store) (i/opts store)
+    (instance? ILMDB store)  (i/env-opts store)
+    :else                    nil))
+
+(defn- replica-runtime-opts
+  [m]
+  (replica/normalized-opts
+   (or (:replica-opts m)
+       (some-> (:store m) store-open-opts)
+       (current-runtime-opts m))))
+
+(defn- mark-replica-status!
+  [^Server server db-name status]
+  (update-db server db-name
+             #(merge %
+                     (assoc status
+                            :replica-last-status-ms
+                            (System/currentTimeMillis)))))
+
+(defn- replica-status-error
+  [^Throwable e]
+  {:replica-degraded-reason (or (:type (ex-data e))
+                                (:error (ex-data e))
+                                :replica/sync-error)
+   :replica-last-error      (or (ex-message e) (str e))})
+
+(defn- refresh-replica-dt-db
+  [m]
+  (let [store (:store m)]
+    (cond-> m
+      (instance? IStore store)
+      (assoc :dt-db (new-runtime-db store (current-runtime-opts m))))))
+
+(defn- apply-replica-record!
+  [^Server server db-name record]
+  (with-db-runtime-store-swap
+    server
+    db-name
+    (fn []
+      (let [next-state
+            (binding [drep/*ha-current-state-fn*
+                      #(get (.-dbs server) db-name)
+                      drep/*ha-with-local-store-swap-fn*
+                      (fn [f] (f))
+                      drep/*ha-with-local-store-read-fn*
+                      (fn [f] (f))]
+              (drep/apply-ha-follower-txlog-record!
+               (get (.-dbs server) db-name)
+               record))
+            applied-lsn (long (:lsn record))
+            next-state  (-> next-state
+                            refresh-replica-dt-db
+                            (assoc :replica-applied-lsn applied-lsn
+                                   :replica-last-sync-ms
+                                   (System/currentTimeMillis)
+                                   :replica-degraded-reason nil
+                                   :replica-last-error nil))]
+        (update-db server db-name (constantly next-state))
+        applied-lsn))))
+
+(defn- report-replica-floor-if-needed!
+  [^Server server db-name source opts applied-lsn force?]
+  (let [m             (get (.-dbs server) db-name)
+        now           (System/currentTimeMillis)
+        last-report   (long (or (:replica-last-floor-report-ms m) 0))
+        report-every  (long (:replica/report-ms opts))
+        should-report (or force?
+                          (>= (- now last-report) report-every))]
+    (when (and (pos? (long applied-lsn)) should-report)
+      (replica/report-floor! source opts applied-lsn)
+      (update-db server db-name
+                 #(assoc %
+                         :replica-last-floor-report-ms now
+                         :replica-last-floor-reported-lsn
+                         (long applied-lsn))))))
+
+(defn- sync-replica-once!
+  [^Server server db-name source]
+  (let [m          (get (.-dbs server) db-name)
+        opts       (replica-runtime-opts m)
+        store      (:store m)
+        local-kv   (if (instance? Store store) (.-lmdb ^Store store) store)
+        source-wm  (replica/source-watermarks source)
+        durable    (replica/durable-lsn source-wm)
+        source-max (long (or (:last-committed-lsn source-wm) durable))
+        applied    (long (or (:replica-applied-lsn m)
+                             (replica/local-applied-lsn local-kv)))
+        next-lsn   (unchecked-inc applied)
+        batch-size (long (:replica/batch-records opts))
+        upto-lsn   (let [limit (unchecked-add
+                                 next-lsn
+                                 (unchecked-dec batch-size))]
+                     (if (< durable limit) durable limit))]
+    (mark-replica-status!
+     server db-name
+     {:replica/source (:replica/source opts)
+      :replica/id (:replica/id opts)
+      :replica-source-durable-lsn durable
+      :replica-source-committed-lsn source-max
+      :replica-applied-lsn applied
+      :replica-lag-lsn (let [lag (unchecked-subtract durable applied)]
+                         (if (pos? lag) lag 0))})
+    (if (> next-lsn upto-lsn)
+      (do
+        (report-replica-floor-if-needed! server db-name source opts
+                                         applied false)
+        applied)
+      (let [records (replica/fetch-records source next-lsn upto-lsn)]
+        (replica/validate-contiguous-records! records next-lsn upto-lsn)
+        (let [applied' (reduce (fn [_ record]
+                                 (apply-replica-record! server db-name record))
+                               applied
+                               records)]
+          (report-replica-floor-if-needed! server db-name source opts
+                                           applied' true)
+          (mark-replica-status!
+           server db-name
+           {:replica/source (:replica/source opts)
+            :replica/id (:replica/id opts)
+            :replica-source-durable-lsn durable
+            :replica-source-committed-lsn source-max
+            :replica-applied-lsn applied'
+            :replica-lag-lsn (let [lag (unchecked-subtract durable applied')]
+                               (if (pos? lag) lag 0))
+            :replica-degraded-reason nil
+            :replica-last-error nil})
+          applied')))))
+
+(defn- sleep-replica-loop!
+  [^AtomicBoolean running? poll-ms]
+  (let [deadline (+ (System/currentTimeMillis) (long poll-ms))]
+    (loop []
+      (when (and (.get running?)
+                 (< (System/currentTimeMillis) deadline))
+        (Thread/sleep (min 50 (max 1 (- deadline
+                                        (System/currentTimeMillis)))))
+        (recur)))))
+
+(defn- run-replica-sync-loop
+  [^Server server db-name ^AtomicBoolean running? ^CountDownLatch stopped-latch]
+  (try
+    (loop [source nil]
+      (if-not (.get running?)
+        (when source
+          (replica/close-source-kv! source))
+        (let [m    (get (.-dbs server) db-name)
+              opts (replica-runtime-opts m)]
+          (if-not opts
+            (do
+              (when source
+                (replica/close-source-kv! source))
+              (.set running? false))
+            (let [poll-ms (long (:replica/poll-ms opts))
+                  source' (or source
+                              (try
+                                (replica/open-source-kv opts)
+                                (catch Throwable e
+                                  (mark-replica-status!
+                                   server db-name (replica-status-error e))
+                                  nil)))]
+              (if-not source'
+                (do
+                  (sleep-replica-loop! running? poll-ms)
+                  (recur nil))
+                (let [next-source
+                      (try
+                        (sync-replica-once! server db-name source')
+                        source'
+                        (catch Throwable e
+                          (log/warn e "Replica sync failed"
+                                    {:db-name db-name})
+                          (mark-replica-status!
+                           server db-name (replica-status-error e))
+                          (replica/close-source-kv! source')
+                          nil))]
+                  (sleep-replica-loop! running? poll-ms)
+                  (recur next-source))))))))
+    (finally
+      (.countDown stopped-latch))))
+
+(defn- stop-replica-sync-loop
+  [m]
+  (when-let [^AtomicBoolean running? (:replica-loop-running? m)]
+    (.set running? false))
+  (when-let [^CountDownLatch stopped (:replica-loop-stopped-latch m)]
+    (try
+      (.await stopped 5000 TimeUnit/MILLISECONDS)
+      (catch Throwable _
+        nil))))
+
+(defn- ensure-replica-sync-loop
+  [^Server server db-name]
+  (let [m (get (.-dbs server) db-name)]
+    (when (and (replica-runtime-opts m)
+               (not (some-> ^AtomicBoolean (:replica-loop-running? m) .get)))
+      (let [running?      (AtomicBoolean. true)
+            stopped-latch (CountDownLatch. 1)]
+        (update-db server db-name
+                   #(assoc %
+                           :replica-loop-running? running?
+                           :replica-loop-stopped-latch stopped-latch))
+        (execute server
+                 #(run-replica-sync-loop server db-name
+                                         running? stopped-latch))))))
+
 (defn- stop-ha-background-loops!
   [^Server server]
   (doseq [db-name (keys (.-dbs server))]
     (when-let [m (get (.-dbs server) db-name)]
+      (stop-replica-sync-loop m)
       (stop-ha-renew-loop m)
       (stop-ha-follower-sync-loop m))))
 
@@ -864,12 +1074,33 @@
                                                  published-store)
                            runtime-opts (resolved-runtime-opts
                                           server db-name published-store m)
+                           replica-opts  (or (replica/normalized-opts
+                                               explicit-ha-runtime-opts)
+                                             (replica/normalized-opts
+                                               (store-open-opts
+                                                published-store))
+                                             (replica/normalized-opts
+                                               runtime-opts))
+                           bootstrap-applied-lsn
+                           (replica/bootstrap-applied-lsn
+                             (:replica/bootstrap-meta replica-opts))
                            runtime-local-opts
                            (some-> ha-runtime-opts
                                    dha/select-ha-runtime-local-opts)
                            next-m       (assoc m
                                                :store published-store
                                                :runtime-opts runtime-opts)
+                           next-m       (cond-> next-m
+                                          replica-opts
+                                          (merge replica-opts
+                                                 {:replica-opts replica-opts}))
+                           next-m       (cond-> next-m
+                                          (and replica-opts
+                                               bootstrap-applied-lsn
+                                               (nil? (:replica-applied-lsn
+                                                       next-m)))
+                                          (assoc :replica-applied-lsn
+                                                 bootstrap-applied-lsn))
                            next-m       (cond-> next-m
                                           (and (not activate-runtime?)
                                                (some? ha-runtime-opts))
@@ -905,6 +1136,7 @@
                    (close-store store))
                  (ensure-ha-renew-loop server db-name)
                  (ensure-ha-follower-sync-loop server db-name)
+                 (ensure-replica-sync-loop server db-name)
                  @published-store-v
                  (catch Throwable t
                    (close-unpublished-store!)
@@ -931,7 +1163,8 @@
        (:wdt-db m)
        (or
        (when (or (:ha-authority m)
-                 (:ha-role m))
+                 (:ha-role m)
+                 (:replica/read-only? m))
            (when-let [store (or (usable-store (:store m))
                                 (runtime-db-store (:dt-db m)))]
             (cpp/invalidate-thread-reader!
@@ -957,6 +1190,7 @@
     db-name
     (fn []
       (let [m (get (.-dbs server) db-name)]
+        (stop-replica-sync-loop m)
         (stop-ha-renew-loop m)
         (stop-ha-follower-sync-loop m)
         (stop-ha-authority db-name m)
@@ -1408,7 +1642,17 @@
             db-name
             (fn []
               (let [dir              (db-dir (.-root server) db-name)
+                    open-opts        opts
+                    opts             (replica/local-open-opts open-opts)
                     existing-db-now? (db-exists? server db-name)
+                    bootstrap-meta   (when (and (replica/enabled? open-opts)
+                                                (not existing-db-now?))
+                                       (replica/bootstrap-copy-if-needed!
+                                         db-name dir open-opts))
+                    runtime-open-opts
+                    (cond-> open-opts
+                      bootstrap-meta
+                      (assoc :replica/bootstrap-meta bootstrap-meta))
                     db-type          (effective-db-type
                                        server db-name requested-db-type)
                     activate-runtime? (activate-runtime-on-open?
@@ -1431,7 +1675,8 @@
                                                (throw e)))))
                     store            (try
                                        (add-store
-                                         server db-name store activate-runtime? opts)
+                                         server db-name store activate-runtime?
+                                         runtime-open-opts)
                                        (catch Throwable t
                                          (when (and (some? store)
                                                     (not (store-closed? store)))
