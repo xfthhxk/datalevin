@@ -889,6 +889,7 @@
 
 (def ^:private ha-datalog-retry-request-types
   #{:assoc-opt
+    :assoc-opts
     :set-schema
     :init-max-eid
     :del-attr
@@ -1503,6 +1504,15 @@
   "Return async read-replica status for an open database."
   [client db-name]
   (normal-request client :replica-status [db-name]))
+
+(defn ha-update-membership!
+  "Operator-driven consensus HA membership update for an open database.
+
+  `spec` may include `:ha-members`, `:ha-control-plane {:voters [...]}`,
+  `:ha-control-plane-voters`, `:expected-membership-hash`, `:clear-leases?`,
+  `:replace-voters?`, and `:timeout-ms`."
+  [client db-name spec]
+  (normal-request client :ha-update-membership! [db-name spec]))
 
 (defn list-databases-in-use
   "List databases that are in use."

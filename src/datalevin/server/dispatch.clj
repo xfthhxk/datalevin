@@ -39,6 +39,8 @@
 (def ^:private replica-extra-write-command-types
   #{:drop-database
     :assoc-opt
+    :assoc-opts
+    :ha-update-membership!
     :force-txlog-sync!
     :force-lmdb-sync!
     :create-snapshot!

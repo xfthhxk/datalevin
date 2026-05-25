@@ -8,6 +8,7 @@
    datalevin.test.db
    datalevin.test.entity
    datalevin.test.explode
+   datalevin.test.ha-control
    datalevin.test.ident
    datalevin.test.index
    datalevin.test.listen
@@ -45,6 +46,7 @@
           'datalevin.test.db
           'datalevin.test.entity
           'datalevin.test.explode
+          'datalevin.test.ha-control
           'datalevin.test.ident
           'datalevin.test.index
           'datalevin.test.listen

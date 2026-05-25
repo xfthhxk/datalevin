@@ -215,6 +215,59 @@ the open request. Once the transaction session is opened, however, it stays
 bound to that server connection and is not automatically migrated to a new
 leader mid-transaction.
 
+#### HA static membership changes
+
+Consensus HA membership is static and operator managed. Datalevin does not
+discover nodes automatically, but a cluster can be reconfigured without wiping
+the control-plane Raft log by committing a new authoritative membership hash:
+
+```clojure
+(require '[datalevin.client :as cl])
+
+(def client
+  (cl/new-client "dtlv://admin:pass@node-a:8898"))
+
+(cl/ha-update-membership!
+ client
+ "app"
+ {:ha-members
+  [{:node-id 1 :endpoint "dtlv://node-a:8898/app"}
+   {:node-id 2 :endpoint "dtlv://node-b:8898/app"}
+   {:node-id 3 :endpoint "dtlv://node-c-new:8898/app"}]
+  :ha-control-plane
+  {:voters [{:peer-id "node-a:9098" :promotable? true :ha-node-id 1}
+            {:peer-id "node-b:9098" :promotable? true :ha-node-id 2}
+            {:peer-id "node-c-new:9098" :promotable? true :ha-node-id 3}]}})
+```
+
+The request validates the proposed `:ha-members` and control-plane `:voters`,
+optionally replaces the Raft voter set, persists the new HA options on the
+target server, CAS-updates the authoritative membership hash, clears existing
+leases by default, and restarts that server's local HA runtime. A node whose
+local config does not match the authoritative hash starts in a fail-closed,
+non-promotable state so it can be staged before the hash is updated.
+
+Useful request keys:
+
+* `:ha-members`: replacement static member list.
+* `:ha-control-plane {:voters [...]}` or `:ha-control-plane-voters`:
+  replacement control-plane voters. Other control-plane keys are not changed by
+  this live API.
+* `:expected-membership-hash`: optional CAS guard. If omitted, the server reads
+  the current authoritative hash before applying the update.
+* `:replace-voters?`: defaults to `true`; set to `false` only if the
+  control-plane voter set was changed separately.
+* `:clear-leases?`: defaults to `true`; this forces write leadership to be
+  reacquired under the new membership.
+* `:timeout-ms`: optional control-plane operation timeout.
+
+Run the same update on each surviving or newly staged server, or otherwise open
+those servers with the same new HA options, so their local persisted options
+match the authoritative hash. Subsequent calls with the same desired membership
+are idempotent and can be used to persist local options on nodes that were
+staged before the first cluster-wide hash update. Removed nodes should be shut
+down and left out of the new member and voter lists.
+
 #### HA replica reads
 
 In HA deployments, a client can read from a replica/follower by connecting to

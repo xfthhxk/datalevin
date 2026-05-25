@@ -7,6 +7,10 @@
   roll-over and promotion
   [#72](https://github.com/datalevin/datalevin/issues/72). Details in
   [doc](doc/ha.md).
+- [Server] Operator-driven HA static membership updates via
+  `datalevin.client/ha-update-membership!`, including authoritative
+  membership-hash CAS update, optional control-plane voter replacement, and
+  lease clearing.
 - [Server] Non-HA asynchronous read only replicas, This provides a simple
   primary/read-only replica topology without automatic promotion, fencing, or
   quorum. Details in [doc](doc/server.md#non-ha-async-read-replicas).

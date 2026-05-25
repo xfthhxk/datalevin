@@ -1793,18 +1793,19 @@
 
 (defn- prepare-assoc-opt-rollback-backup!
   [^Server server db-name store k]
-  (when (and (instance? Store store)
-             (or (contains? ha-runtime-option-key-set k)
-                 (some? (resolved-ha-runtime-opts (.-root server)
-                                                 db-name
-                                                 store))))
-    (let [current-state (get (.-dbs server) db-name)
-          runtime-ha-opts (resolved-ha-runtime-opts
-                           (.-root server)
-                           db-name
-                           store
-                           current-state)]
-      {:ha-runtime-opts runtime-ha-opts})))
+  (let [ks (if (sequential? k) k [k])]
+    (when (and (instance? Store store)
+               (or (some ha-runtime-option-key-set ks)
+                   (some? (resolved-ha-runtime-opts (.-root server)
+                                                    db-name
+                                                    store))))
+      (let [current-state (get (.-dbs server) db-name)
+            runtime-ha-opts (resolved-ha-runtime-opts
+                             (.-root server)
+                             db-name
+                             store
+                             current-state)]
+        {:ha-runtime-opts runtime-ha-opts}))))
 
 (defn- reject-unsafe-live-ha-option-mutation!
   [^Server server db-name store k old-opts new-opts]
@@ -1820,6 +1821,12 @@
              {:error :ha/unsafe-live-option-mutation
               :db-name db-name
               :option k})))
+
+(defn- reject-unsafe-live-ha-option-mutations!
+  [^Server server db-name store ks old-opts new-opts]
+  (doseq [k ks]
+    (reject-unsafe-live-ha-option-mutation!
+     server db-name store k old-opts new-opts)))
 
 (defn- cleanup-assoc-opt-rollback-backup!
   [{:keys [backup-root]}]
@@ -1860,6 +1867,17 @@
       (finally
         (cleanup-assoc-opt-rollback-backup! rollback-backup)))))
 
+(defn- apply-store-option-mutations
+  [opts kvs]
+  (reduce-kv
+   (fn [m k v]
+     (let [k' (c/canonical-wal-option-key k)]
+       (-> m
+           (dissoc k)
+           (assoc k' v))))
+   opts
+   kvs))
+
 (defn- apply-assoc-opt!
   [^Server server db-name store writing? k v]
   (let [old-opts (when (instance? IStore store)
@@ -1891,6 +1909,39 @@
                                    store
                                    old-opts
                                    k'
+                                   rollback-backup))
+            (throw t))
+          (finally
+            (when-not writing?
+              (cleanup-assoc-opt-rollback-backup! rollback-backup))))))))
+
+(defn- apply-assoc-opts!
+  [^Server server db-name store writing? kvs]
+  (let [old-opts (when (instance? IStore store)
+                   (i/opts store))
+        ks       (mapv c/canonical-wal-option-key (keys kvs))
+        new-opts (when old-opts
+                   (apply-store-option-mutations old-opts kvs))]
+    (if (and old-opts (= old-opts new-opts))
+      old-opts
+      (let [rollback-backup (when-not writing?
+                              (prepare-assoc-opt-rollback-backup!
+                               server db-name store ks))]
+        (try
+          (when-not writing?
+            (reject-unsafe-live-ha-option-mutations!
+             server db-name store ks old-opts new-opts))
+          (let [result (i/assoc-opts store kvs)]
+            (when-not writing?
+              (add-store server db-name store true))
+            result)
+          (catch Throwable t
+            (when-not writing?
+              (rollback-assoc-opt! server
+                                   db-name
+                                   store
+                                   old-opts
+                                   ks
                                    rollback-backup))
             (throw t))
           (finally
@@ -2016,6 +2067,7 @@
   []
   {:add-store add-store
    :apply-assoc-opt! apply-assoc-opt!
+   :apply-assoc-opts! apply-assoc-opts!
    :authenticate authenticate
    :cleanup-copy-tmp-dir! cleanup-copy-tmp-dir!
    :client-display client-display

@@ -51,6 +51,8 @@
     "Read authoritative membership hash (nil when unset).")
   (init-membership-hash! [this membership-hash]
     "Initialize authoritative membership hash once, compare-only afterwards.")
+  (update-membership-hash! [this req]
+    "CAS-update authoritative membership hash for manual reconfiguration.")
   (read-voters [this]
     "Read authoritative control-plane voter peer IDs.")
   (replace-voters! [this voters]
@@ -523,6 +525,52 @@
                 :membership-hash existing
                 :expected membership-hash}})))
 
+(defn- apply-update-membership-hash-transition
+  [state {:keys [expected-membership-hash membership-hash clear-leases?]}]
+  (require-non-blank-string! membership-hash :membership-hash)
+  (let [existing      (:membership-hash state)
+        clear-leases? (not (false? clear-leases?))]
+    (cond
+      (= existing membership-hash)
+      {:state state
+       :result {:ok? true
+                :updated? false
+                :idempotent? true
+                :membership-hash existing
+                :previous-membership-hash existing
+                :cleared-leases 0}}
+
+      (nil? existing)
+      {:state state
+       :result {:ok? false
+                :reason :membership-hash-uninitialized
+                :membership-hash nil
+                :expected expected-membership-hash}}
+
+      (not (non-blank-string? expected-membership-hash))
+      {:state state
+       :result {:ok? false
+                :reason :missing-expected-membership-hash
+                :membership-hash existing
+                :expected expected-membership-hash}}
+
+      (not= existing expected-membership-hash)
+      {:state state
+       :result {:ok? false
+                :reason :membership-hash-mismatch
+                :membership-hash existing
+                :expected expected-membership-hash}}
+
+      :else
+      (let [lease-count (count (:leases state))]
+        {:state (cond-> (assoc state :membership-hash membership-hash)
+                  clear-leases? (assoc :leases {}))
+         :result {:ok? true
+                  :updated? true
+                  :membership-hash membership-hash
+                  :previous-membership-hash existing
+                  :cleared-leases (if clear-leases? lease-count 0)}}))))
+
 (defn- apply-read-state-transition
   [state db-identity]
   (let [{:keys [lease version]} (lease-entry state db-identity)]
@@ -566,6 +614,8 @@
                            (:req cmd)))
     :init-membership-hash (apply-init-membership-hash-transition
                            state (:membership-hash cmd))
+    :update-membership-hash (apply-update-membership-hash-transition
+                             state (:req cmd))
     :read-state          (apply-read-state-transition state (:db-identity cmd))
     (u/raise "Unsupported HA control command"
              {:error :ha/control-invalid-command
@@ -1684,6 +1734,13 @@
     (lease/validate-membership-hash-key! group-id)
     (submit-command! this {:op :init-membership-hash
                            :membership-hash membership-hash}))
+
+  (update-membership-hash! [this req]
+    (ensure-running! running-v)
+    (lease/validate-membership-hash-key! group-id)
+    (submit-command! this {:op :update-membership-hash
+                           :timeout-ms (:timeout-ms req)
+                           :req req}))
 
   (read-voters [this]
     (ensure-running! running-v)

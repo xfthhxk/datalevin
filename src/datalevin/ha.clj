@@ -1099,6 +1099,8 @@
             local-start-nanos (ha-now-nanos)
             derived-hash (vld/derive-ha-membership-hash ha-opts)
             init-result (ctrl/init-membership-hash! authority derived-hash)
+            init-ok? (:ok? init-result)
+            membership-mismatch? (not init-ok?)
             startup-read
             (startup-read-ha-authority-state db-name authority db-identity)
             observed-at-ms (ha-now-ms)
@@ -1115,7 +1117,8 @@
             lease-local-deadline-nanos
             (authority-lease-local-deadline-nanos
              lease authority-now-ms local-start-nanos)
-            local-authority-owner? (and lease
+            local-authority-owner? (and init-ok?
+                                        lease
                                         (= node-id (:leader-node-id lease))
                                         (not (ha-lease-expired-for-promotion?
                                               {:ha-clock-skew-budget-ms
@@ -1137,13 +1140,20 @@
               (long (max (+ (long observed-at-ms) (long renew-ms))
                          (+ (long (or (:lease-until-ms lease)
                                       observed-at-ms))
-                            (long renew-ms)))))]
-        (when-not (:ok? init-result)
-          (u/raise "HA membership hash mismatch with authoritative control plane"
-                   {:error :ha/membership-hash-mismatch
+                           (long renew-ms)))))]
+        (when (and (not init-ok?)
+                   (not= :membership-hash-mismatch (:reason init-result)))
+          (u/raise "HA membership hash initialization failed"
+                   {:error :ha/membership-hash-init-failed
                     :db-name db-name
                     :derived-hash derived-hash
                     :authority init-result}))
+        (when membership-mismatch?
+          (log/warn "HA membership hash mismatch with authoritative control plane; node will run fail-closed until membership is updated"
+                    {:db-name db-name
+                     :ha-node-id node-id
+                     :derived-hash derived-hash
+                     :authority init-result}))
         (when local-authority-owner?
           (log/info "HA startup resumed local authority ownership as leader"
                     {:db-name db-name
@@ -1155,7 +1165,7 @@
                  :ha-membership-hash derived-hash
                  :ha-authority-membership-hash (:membership-hash init-result)
                  :ha-db-identity-mismatch? false
-                 :ha-membership-mismatch? false
+                 :ha-membership-mismatch? membership-mismatch?
                  :ha-client-cache-state client-cache-state
                  :ha-members members
                  :ha-members-sorted ordered-members

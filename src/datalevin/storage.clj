@@ -63,6 +63,26 @@
 (declare with-open-opts close-store-resources! release-shared-local-store!)
 (declare enqueue-secondary-index-work! enqueue-secondary-index-work-if-needed!)
 
+(def ^:private async-secondary-index-option-keys
+  #{:async-secondary-index-worker-max-jobs
+    :async-secondary-index-worker-lease-ms
+    :async-secondary-index-retry-base-ms
+    :async-secondary-index-retry-max-ms})
+
+(defn- apply-option-mutations
+  [opts kvs]
+  (when-not (map? kvs)
+    (u/raise "Option mutations must be a map" {:value kvs}))
+  (reduce-kv
+   (fn [m k v]
+     (let [k' (c/canonical-wal-option-key k)]
+       (vld/validate-option-mutation k' v)
+       (-> m
+           (dissoc k)
+           (assoc k' v))))
+   opts
+   kvs))
+
 (defonce ^:private shared-local-stores (atom {}))
 
 (defn- shared-local-store-key
@@ -542,31 +562,30 @@
   (opts [_] opts)
 
   (assoc-opt [this k v]
-    (let [k' (c/canonical-wal-option-key k)
-          _  (vld/validate-option-mutation k' v)
-          new-opts (-> opts
-                       (dissoc k)
-                       (assoc k' v))]
+    (let [k'       (c/canonical-wal-option-key k)
+          new-opts (apply-option-mutations opts {k v})]
       (vld/validate-ha-store-opts new-opts)
       (if (= opts new-opts)
         opts
         (do
           (set! opts new-opts)
           (let [res (transact-opts lmdb new-opts)]
-            (case k'
-              :async-secondary-index-worker-max-jobs
+            (when (contains? async-secondary-index-option-keys k')
               (enqueue-secondary-index-work! this)
+              nil)
+            res)))))
 
-              :async-secondary-index-worker-lease-ms
-              (enqueue-secondary-index-work! this)
-
-              :async-secondary-index-retry-base-ms
-              (enqueue-secondary-index-work! this)
-
-              :async-secondary-index-retry-max-ms
-              (enqueue-secondary-index-work! this)
-
-              :pass)
+  (assoc-opts [this kvs]
+    (let [new-opts (apply-option-mutations opts kvs)]
+      (vld/validate-ha-store-opts new-opts)
+      (if (= opts new-opts)
+        opts
+        (do
+          (set! opts new-opts)
+          (let [res (transact-opts lmdb new-opts)]
+            (when (some async-secondary-index-option-keys
+                        (map c/canonical-wal-option-key (keys kvs)))
+              (enqueue-secondary-index-work! this))
             res)))))
 
   (db-name [_] (:db-name opts))

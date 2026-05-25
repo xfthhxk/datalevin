@@ -27,6 +27,7 @@
    [datalevin.server.auth :as auth]
    [datalevin.storage :as st]
    [datalevin.util :as u]
+   [datalevin.validate :as vld]
    [taoensso.timbre :as log])
   (:import
    [java.nio.channels SelectionKey SocketChannel]
@@ -52,6 +53,7 @@
   #{:ha-mode
     :ha-control-plane
     :ha-members
+    :ha-membership-hash
     :ha-node-id
     :ha-client-credentials
     :ha-fencing-hook
@@ -103,6 +105,15 @@
 (defn- with-privileged-server-option-permission!
   [deps server skey k f]
   (if (privileged-server-option-key? k)
+    (with-permission!
+      deps server skey control-act server-obj nil
+      "Server control permission is required to configure consensus HA or server-local options"
+      f)
+    (f)))
+
+(defn- with-privileged-server-options-permission!
+  [deps server skey ks f]
+  (if (some privileged-server-option-key? ks)
     (with-permission!
       deps server skey control-act server-obj nil
       "Server control permission is required to configure consensus HA or server-local options"
@@ -1141,6 +1152,237 @@
                skey
                ((:apply-assoc-opt! deps)
                 server db-name store writing? k v)))))))))
+
+(defn assoc-opts
+  [deps server skey {:keys [args writing?]}]
+  (with-error
+    deps
+    skey
+    #(let [db-name (nth args 0)
+           store   (dt-store deps server skey db-name writing?)
+           kvs     (nth args 1)]
+       (when-not (map? kvs)
+         (u/raise "assoc-opts expects a map of option mutations"
+                  {:error :server/invalid-request
+                   :db-name db-name
+                   :value kvs}))
+       (db-alter-permission!
+        deps server skey db-name
+        "Don't have permission to alter the database"
+        (fn []
+          (with-privileged-server-options-permission!
+            deps server skey (keys kvs)
+            (fn []
+              (write-result!
+               deps
+               skey
+               ((:apply-assoc-opts! deps)
+                server db-name store writing? kvs)))))))))
+
+(def ^:private ha-membership-update-spec-keys
+  #{:ha-members
+    :ha-control-plane
+    :ha-control-plane-voters
+    :expected-membership-hash
+    :clear-leases?
+    :replace-voters?
+    :timeout-ms})
+
+(defn- merge-ha-control-plane-opts
+  [base overlay]
+  (let [base    (or base {})
+        overlay (or overlay {})]
+    (cond-> (merge base overlay)
+      (or (contains? base :ha-control-plane)
+          (contains? overlay :ha-control-plane))
+      (assoc :ha-control-plane
+             (merge (:ha-control-plane base)
+                    (:ha-control-plane overlay))))))
+
+(defn- validate-ha-membership-update-spec!
+  [spec]
+  (when-not (map? spec)
+    (u/raise "HA membership update expects a map"
+             {:error :ha/membership-update-invalid-request
+              :spec spec}))
+  (when-let [unknown (seq (remove ha-membership-update-spec-keys (keys spec)))]
+    (u/raise "HA membership update contains unknown keys"
+             {:error :ha/membership-update-invalid-request
+              :unknown-keys (vec unknown)}))
+  (when (and (contains? spec :ha-control-plane)
+             (not (map? (:ha-control-plane spec))))
+    (u/raise "HA membership update :ha-control-plane expects a map"
+             {:error :ha/membership-update-invalid-request
+              :ha-control-plane (:ha-control-plane spec)}))
+  (when-let [extra-cp-keys
+             (seq (remove #{:voters}
+                          (keys (:ha-control-plane spec))))]
+    (u/raise "HA membership update can only change :ha-control-plane :voters"
+             {:error :ha/membership-update-invalid-request
+              :unsupported-control-plane-keys (vec extra-cp-keys)}))
+  spec)
+
+(defn- ha-update-voters
+  [old-control-plane spec]
+  (cond
+    (contains? spec :ha-control-plane-voters)
+    (:ha-control-plane-voters spec)
+
+    (contains? (:ha-control-plane spec) :voters)
+    (get-in spec [:ha-control-plane :voters])
+
+    :else
+    (:voters old-control-plane)))
+
+(defn- persistable-ha-control-plane
+  [cp]
+  (apply dissoc cp [:local-peer-id :raft-dir]))
+
+(defn- ha-voter-peer-ids
+  [voters]
+  (mapv :peer-id voters))
+
+(defn- same-peer-ids?
+  [a b]
+  (= (vec (sort a))
+     (vec (sort b))))
+
+(defn- rollback-ha-membership-local-opts!
+  [store old-kvs]
+  (try
+    (i/assoc-opts store old-kvs)
+    (catch Throwable e
+      (log/error e "Failed to roll back local HA membership options"))))
+
+(defn- ha-membership-update-plan
+  [deps store db-state spec]
+  (let [old-opts        (i/opts store)
+        runtime-opts    ((:current-runtime-opts deps) db-state)
+        base-opts       (merge-ha-control-plane-opts old-opts runtime-opts)
+        old-control     (:ha-control-plane old-opts)
+        runtime-control (:ha-control-plane base-opts)
+        new-members     (if (contains? spec :ha-members)
+                          (:ha-members spec)
+                          (:ha-members old-opts))
+        new-voters      (ha-update-voters old-control spec)
+        validation-cp   (assoc runtime-control :voters new-voters)
+        persist-cp      (persistable-ha-control-plane
+                         (assoc old-control :voters new-voters))
+        validation-opts (-> base-opts
+                            (assoc :ha-members new-members
+                                   :ha-control-plane validation-cp)
+                            (dissoc :ha-membership-hash))
+        new-hash        (vld/derive-ha-membership-hash validation-opts)
+        validation-opts (assoc validation-opts
+                               :ha-membership-hash new-hash)
+        persist-kvs     {:ha-members new-members
+                         :ha-control-plane persist-cp
+                         :ha-membership-hash new-hash}
+        old-kvs         {:ha-members (:ha-members old-opts)
+                         :ha-control-plane old-control
+                         :ha-membership-hash
+                         (:ha-membership-hash old-opts)}]
+    (vld/validate-ha-store-opts validation-opts)
+    {:old-opts old-opts
+     :old-kvs old-kvs
+     :persist-kvs persist-kvs
+     :runtime-opts validation-opts
+     :membership-hash new-hash
+     :voter-peer-ids (ha-voter-peer-ids new-voters)}))
+
+(defn ha-update-membership!
+  [deps server skey {:keys [args writing?]}]
+  (with-error
+    deps
+    skey
+    #(let [db-name (u/lisp-case (nth args 0 nil))
+           spec    (validate-ha-membership-update-spec! (nth args 1))]
+       (when writing?
+         (u/raise "HA membership update must be issued outside with-transaction"
+                  {:error :ha/membership-update-invalid-request
+                   :db-name db-name}))
+       (db-alter-permission!
+        deps server skey db-name
+        "Don't have permission to alter the database"
+        (fn []
+          (with-permission!
+            deps server skey control-act server-obj nil
+            "Server control permission is required to update HA membership"
+            (fn []
+              (let [store     (dt-store deps server skey db-name false)
+                    db-state  (db-state deps server db-name)
+                    authority (:ha-authority db-state)]
+                (when-not authority
+                  (u/raise "Database is not running consensus HA"
+                           {:error :ha/not-enabled
+                            :db-name db-name}))
+                (let [{:keys [old-kvs persist-kvs runtime-opts
+                              membership-hash voter-peer-ids]}
+                      (ha-membership-update-plan deps store db-state spec)
+                      current-hash (ctrl/read-membership-hash authority)
+                      expected-hash (or (:expected-membership-hash spec)
+                                        current-hash)]
+                  (when-not (= current-hash expected-hash)
+                    (u/raise "HA membership update expected hash does not match authority"
+                             {:error :ha/membership-hash-mismatch
+                              :db-name db-name
+                              :expected expected-hash
+                              :membership-hash current-hash
+                              :requested-membership-hash membership-hash}))
+                  (let [replace-voters? (not (false? (:replace-voters? spec)))
+                        current-voters  (ctrl/read-voters authority)
+                        voters-changed? (not (same-peer-ids?
+                                              current-voters
+                                              voter-peer-ids))]
+                    (i/assoc-opts store persist-kvs)
+                    (let [voters-result
+                          (try
+                            (when (and replace-voters?
+                                       voters-changed?)
+                              (ctrl/replace-voters!
+                               authority
+                               (vec voter-peer-ids)))
+                            (catch Throwable t
+                              (rollback-ha-membership-local-opts!
+                               store old-kvs)
+                              (throw t)))
+                          update-result
+                          (try
+                            (ctrl/update-membership-hash!
+                             authority
+                             {:expected-membership-hash expected-hash
+                              :membership-hash membership-hash
+                              :clear-leases? (not (false?
+                                                   (:clear-leases? spec)))
+                              :timeout-ms (:timeout-ms spec)})
+                            (catch Throwable t
+                              (rollback-ha-membership-local-opts!
+                               store old-kvs)
+                              (throw t)))]
+                      (when-not (:ok? update-result)
+                        (rollback-ha-membership-local-opts! store old-kvs)
+                        (u/raise "HA membership update was rejected by the control plane"
+                                 {:error :ha/membership-update-rejected
+                                  :db-name db-name
+                                  :result update-result}))
+                      ((:add-store deps) server db-name store true runtime-opts)
+                      (write-result!
+                       deps
+                       skey
+                       (wire-safe-diagnostic
+                        (cond-> {:ok? true
+                                 :db-name db-name
+                                 :membership-hash membership-hash
+                                 :previous-membership-hash
+                                 (:previous-membership-hash update-result)
+                                 :cleared-leases
+                                 (:cleared-leases update-result)
+                                 :voters voter-peer-ids
+                                 :voters-changed? voters-changed?
+                                 :membership-updated?
+                                 (:updated? update-result)}
+                          voters-result
+                          (assoc :voter-update voters-result)))))))))))))))
 
 (defn set-schema
   [deps server skey {:keys [args writing?]}]
@@ -2360,6 +2602,7 @@
    :closed? closed?
    :opts (normal-dt-handler i/opts)
    :assoc-opt assoc-opt
+   :assoc-opts assoc-opts
    :last-modified (normal-dt-handler i/last-modified)
    :schema (normal-dt-handler i/schema)
    :rschema (normal-dt-handler i/rschema)
@@ -2381,6 +2624,7 @@
    :get-env-flags (normal-kv-handler i/get-env-flags)
    :sync sync
    :ha-watermark ha-watermark
+   :ha-update-membership! ha-update-membership!
    :txlog-watermarks (normal-kv-handler kv/txlog-watermarks)
    :open-tx-log (normal-kv-handler kv/open-tx-log)
    :open-tx-log-rows (normal-kv-handler kv/open-tx-log-rows)

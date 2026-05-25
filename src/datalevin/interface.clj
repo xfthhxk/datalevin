@@ -339,6 +339,7 @@ values;")
 (defprotocol IStore
   (opts [this] "Return the opts map")
   (assoc-opt [this k v] "Set an option")
+  (assoc-opts [this kvs] "Set multiple options atomically")
   (db-name [this] "Return the db-name")
   (dir [this] "Return the data file directory")
   (close [this] "Close storage")

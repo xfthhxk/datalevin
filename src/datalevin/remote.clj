@@ -342,6 +342,9 @@
   (assoc-opt [_ k v]
     (datalog-request read-floor-tx client :assoc-opt [db-name k v] writing?))
 
+  (assoc-opts [_ kvs]
+    (datalog-request read-floor-tx client :assoc-opts [db-name kvs] writing?))
+
   (db-name [_] db-name)
 
   (dir [_] uri)
