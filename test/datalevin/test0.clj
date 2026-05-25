@@ -28,6 +28,7 @@
    datalevin.test.query-or
    datalevin.test.query-pull
    datalevin.test.query-rules
+   datalevin.test.replica
    datalevin.test.tuples
    datalevin.test.validation
    datalevin.test.upsert
@@ -64,6 +65,7 @@
           'datalevin.test.query-or
           'datalevin.test.query-pull
           'datalevin.test.query-rules
+          'datalevin.test.replica
           'datalevin.test.tuples
           'datalevin.test.validation
           'datalevin.test.upsert

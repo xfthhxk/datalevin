@@ -3,16 +3,13 @@
 ## WIP
 
 ### Added
-- [Server] Non-HA asynchronous read replicas. A replica server can bootstrap
-  from a primary snapshot/copy, tail the primary WAL through `open-tx-log`,
-  replay records locally in LSN order, report replica retention floors, expose
-  `replica-status`, and reject all user writes. This provides a simple
-  primary/read-only replica topology without automatic promotion, fencing, or
-  quorum. Details in [doc](doc/server.md#non-ha-async-read-replicas).
-- [Server] Read only replicas and high availability (HA) cluster with Raft
-  consensus based auto roll-over and promotion
+- [Server] High availability (HA) cluster with Raft consensus based auto
+  roll-over and promotion
   [#72](https://github.com/datalevin/datalevin/issues/72). Details in
   [doc](doc/ha.md).
+- [Server] Non-HA asynchronous read only replicas, This provides a simple
+  primary/read-only replica topology without automatic promotion, fencing, or
+  quorum. Details in [doc](doc/server.md#non-ha-async-read-replicas).
   [Test] HA implementation comes with an extensive Jepsen test suite to validate
   correctness [#252](https://github.com/datalevin/datalevin/issues/252). Details
   in [doc](jepsen/README.md).
