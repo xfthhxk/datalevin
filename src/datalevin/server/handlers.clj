@@ -190,6 +190,12 @@
          distinct
          vec)))
 
+(defn- ha-runtime-read-state?
+  [state]
+  (or (:ha-authority state)
+      (:ha-role state)
+      (:replica/read-only? state)))
+
 (defn- ensure-ha-read-floor!
   [deps server db-name writing? message dt-store]
   (when-let [min-tx (and (not writing?) (ha-read-min-tx message))]
@@ -214,7 +220,10 @@
                     :ha-authoritative-leader-endpoint
                     (get-in state [:ha-authority-lease :leader-endpoint])
                     :ha-retry-endpoints
-                    (ha-read-retry-endpoints state)}))))))
+                    (ha-read-retry-endpoints state)})))
+      (let [state (db-state deps server db-name)]
+        (when (ha-runtime-read-state? state)
+          (db/refresh-cache dt-store))))))
 
 (defn- kv-store
   [deps server skey db-name writing?]
