@@ -1302,15 +1302,19 @@
   (let [value (:value exercise-op)
         drifted-node (:drifted-node value)
         expected (:expected value)
+        mismatch-state (:mismatch-state value)
         values-by-node (into {}
                              (map (fn [[logical-node {:keys [values]}]]
                                     [logical-node values]))
                              (:nodes value))]
     (is (= :ok (:type exercise-op))
         (pr-str exercise-op))
-    (is (some? (:restart-error value)))
-    (is (not (contains? (set (:live-after-failed-restart value))
-                        drifted-node)))
+    (is (and (map? mismatch-state)
+             (true? (:ha-membership-mismatch? mismatch-state))
+             (not= :leader (:ha-role mismatch-state)))
+        (pr-str value))
+    (is (contains? (set (:live-after-mismatched-restart value))
+                   drifted-node))
     (is (contains? (set (:live-after-restart value))
                    drifted-node))
     (is (contains? (set (keys values-by-node))

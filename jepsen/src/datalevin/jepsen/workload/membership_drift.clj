@@ -218,6 +218,30 @@
                    :timeout-ms timeout-ms
                    :last-state last-state})))))))
 
+(defn- wait-for-membership-hash-mismatch!
+  [test logical-node timeout-ms]
+  (let [cluster-id (:datalevin/cluster-id test)
+        deadline   (+ (System/currentTimeMillis) (long timeout-ms))]
+    (loop [last-state nil]
+      (let [state (local/node-diagnostics cluster-id logical-node)]
+        (cond
+          (and (map? state)
+               (true? (:ha-membership-mismatch? state))
+               (not= :leader (:ha-role state)))
+          state
+
+          (< (System/currentTimeMillis) deadline)
+          (do
+            (Thread/sleep 250)
+            (recur (or state last-state)))
+
+          :else
+          (throw (ex-info
+                  "Timed out waiting for membership-hash fail-closed state"
+                  {:logical-node logical-node
+                   :timeout-ms timeout-ms
+                   :last-state last-state})))))))
+
 (defn- wait-for-replacement-leader!
   [test old-leader timeout-ms]
   (let [cluster-id (:datalevin/cluster-id test)
@@ -285,23 +309,17 @@
     (try
       (local/override-node-ha-opts! cluster-id drifted-node
                                     {:ha-members drifted-members})
-      (let [failed-restart (try
-                             (local/restart-node! cluster-id drifted-node)
-                             nil
-                             (catch Throwable e
-                               (restart-error e)))
-            _ (when-not failed-restart
-                (throw (ex-info
-                        "Membership-drift restart unexpectedly succeeded"
-                        {:cluster-id cluster-id
-                         :drifted-node drifted-node
-                         :drifted-node-id drifted-node-id
-                         :drifted-members drifted-members})))
-            live-after-failed-restart
+      (let [_ (local/restart-node! cluster-id drifted-node)
+            mismatch-state (wait-for-membership-hash-mismatch!
+                            test
+                            drifted-node
+                            converge-timeout-ms)
+            live-after-mismatched-restart
             (-> (local/cluster-state cluster-id)
                 :live-nodes
                 sort
                 vec)
+            _ (local/stop-node! cluster-id drifted-node)
             _ (local/clear-node-ha-opts-override!
                cluster-id drifted-node)
             _ (local/restart-node! cluster-id drifted-node)
@@ -329,9 +347,9 @@
          :leader-after leader-after
          :drifted-node drifted-node
          :drifted-node-id drifted-node-id
-         :restart-error failed-restart
+         :mismatch-state mismatch-state
          :live-before live-before
-         :live-after-failed-restart live-after-failed-restart
+         :live-after-mismatched-restart live-after-mismatched-restart
          :live-after-restart live-after-restart
          :expected expected
          :nodes (into {}
@@ -567,18 +585,23 @@
                                   {:type type
                                    :error error
                                    :value value})))
-            missing-drift-failure
+            missing-fail-closed-restart
             (->> oks
-                 (remove :restart-error)
+                 (remove (fn [{:keys [mismatch-state]}]
+                           (and (map? mismatch-state)
+                                (true? (:ha-membership-mismatch?
+                                        mismatch-state))
+                                (not= :leader (:ha-role mismatch-state)))))
                  vec)
             missing-rejoin
             (->> oks
-                 (remove (fn [{:keys [live-after-failed-restart
+                 (remove (fn [{:keys [live-after-mismatched-restart
                                       live-after-restart
                                       drifted-node
                                       nodes]}]
-                           (and (not (contains? (set live-after-failed-restart)
-                                                drifted-node))
+                           (and (contains?
+                                 (set live-after-mismatched-restart)
+                                 drifted-node)
                                 (contains? (set live-after-restart)
                                            drifted-node)
                                 (contains? (set (keys nodes))
@@ -596,23 +619,24 @@
                  vec)]
         {:valid? (boolean (and (seq oks)
                                (empty? failures)
-                               (empty? missing-drift-failure)
+                               (empty? missing-fail-closed-restart)
                                (empty? missing-rejoin)
                                (empty? mismatches)))
          :exercise-count (count oks)
          :failure-count (count failures)
          :failure-samples (vec (take sample-limit failures))
-         :missing-drift-failure-count (count missing-drift-failure)
-         :missing-drift-failure-samples
+         :missing-fail-closed-restart-count
+         (count missing-fail-closed-restart)
+         :missing-fail-closed-restart-samples
          (vec (take sample-limit
                     (map #(select-keys % [:drifted-node
-                                          :restart-error])
-                         missing-drift-failure)))
+                                          :mismatch-state])
+                         missing-fail-closed-restart)))
          :missing-rejoin-count (count missing-rejoin)
          :missing-rejoin-samples
          (vec (take sample-limit
                     (map #(select-keys % [:drifted-node
-                                          :live-after-failed-restart
+                                          :live-after-mismatched-restart
                                           :live-after-restart
                                           :nodes])
                          missing-rejoin)))
