@@ -8,7 +8,13 @@ echo $jvm_version
 
 cd "$(dirname "$0")"
 
-uberjar=../target/datalevin-0.10.13-standalone.jar
+version=$(sed -n 's/^(def version "\(.*\)")/\1/p' ../project.clj | head -n1)
+uberjar="../target/datalevin-${version}-standalone.jar"
+
+if [[ -z "$version" || ! -f "$uberjar" ]]; then
+    echo "Datalevin uberjar not found: $uberjar" >&2
+    exit 1
+fi
 
 if jar tf "$uberjar" | grep -Eq '^(META-INF/maven/|META-INF/leiningen/.*/project\.clj$|META-INF/leiningen/.*/README(\.[^/]+)?$|com/caucho/hessian/test/|org/bouncycastle/util/test/)'; then
     echo "Unexpected third-party metadata or test payload found in $uberjar" >&2
