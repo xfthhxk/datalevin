@@ -32,6 +32,18 @@
             ]
         },
         {
+            "type": "java.util.HashMap",
+            "methods": [
+                {
+                    "name": "put",
+                    "parameterTypes": [
+                        "java.lang.Object",
+                        "java.lang.Object"
+                    ]
+                }
+            ]
+        },
+        {
             "type": "org.joda.time.DateTime"
         },
         {
