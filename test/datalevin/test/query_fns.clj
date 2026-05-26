@@ -858,6 +858,28 @@
     (d/close-db db)
     (u/delete-files dir)))
 
+(deftest aggregate-many-groups-test
+  (let [dir (u/tmp-dir (str "query-aggregate-groups-" (UUID/randomUUID)))
+        db  (-> (d/empty-db dir)
+                (d/db-with
+                  (mapv (fn [n]
+                          (let [n (long n)]
+                            {:db/id (unchecked-inc n)
+                             :group n
+                             :score (mod n 7)}))
+                        (range 40))))]
+    (try
+      (is (= (set (map (fn [n] [n 1]) (range 40)))
+             (set
+               (d/q '[:find ?group (count ?score)
+                      :where
+                      [?e :group ?group]
+                      [?e :score ?score]]
+                    db))))
+      (finally
+        (d/close-db db)
+        (u/delete-files dir)))))
+
 
 (deftest test-exceptions
   (is (thrown-with-msg? ExceptionInfo

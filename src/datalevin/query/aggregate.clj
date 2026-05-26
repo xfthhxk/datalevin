@@ -139,12 +139,17 @@
   (if (zero? (alength group-idxs))
     (when (seq resultset)
       (list resultset))
-    (let [groups (transient {})]
-      (doseq [tuple resultset]
-        (let [key (group-key tuple group-idxs)]
-          (if-let [bucket (get groups key)]
-            (.add ^FastList bucket tuple)
-            (assoc! groups key (doto (FastList.) (.add tuple))))))
+    (let [groups
+          (reduce
+            (fn [groups tuple]
+              (let [key (group-key tuple group-idxs)]
+                (if-let [bucket (get groups key)]
+                  (do
+                    (.add ^FastList bucket tuple)
+                    groups)
+                  (assoc! groups key (doto (FastList.) (.add tuple))))))
+            (transient {})
+            resultset)]
       (vals (persistent! groups)))))
 
 (defn aggregate
