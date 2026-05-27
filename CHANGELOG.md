@@ -1,6 +1,6 @@
 # Change Log
 
-## WIP
+## 0.10.16 (2026-05-27)
 
 ### Added
 - [Server] High availability (HA) cluster with Raft consensus based auto
