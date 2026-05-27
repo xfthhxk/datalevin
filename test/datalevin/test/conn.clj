@@ -128,6 +128,28 @@
         (d/close conn)
         (u/delete-files dir)))))
 
+(deftest test-datalog-ha-reopen-persists-wal-runtime-opts-for-kv-open
+  (let [dir (u/tmp-dir (str "test-datalog-ha-wal-reopen-"
+                            (UUID/randomUUID)))]
+    (try
+      (let [conn (d/create-conn dir)]
+        (d/close conn))
+      (let [conn (d/create-conn dir nil (test-ha-opts))]
+        (try
+          (is (true? (:wal? (conn-env-opts conn))))
+          (is (= :strict (:wal-durability-profile (conn-env-opts conn))))
+          (finally
+            (d/close conn))))
+      (let [db (d/open-kv dir)]
+        (try
+          (is (true? (:wal? (kv/txlog-watermarks db))))
+          (is (= :strict (:durability-profile (kv/txlog-watermarks db))))
+          (is (vector? (vec (kv/open-tx-log-rows db 1 1))))
+          (finally
+            (d/close-kv db))))
+      (finally
+        (u/delete-files dir)))))
+
 (deftest test-datalog-ha-rejects-relaxed-wal
   (let [dir (u/tmp-dir (str "test-datalog-ha-relaxed-"
                             (UUID/randomUUID)))]

@@ -2598,7 +2598,13 @@
                    (some (fn [[k v]]
                            (not= v (get runtime-opts k)))
                          wal-opts))
-          (vswap! info-v merge wal-opts))))))
+          (vswap! info-v merge wal-opts)
+          (when-not (contains? (or (get-env-flags lmdb) #{}) :rdonly)
+            (kv/transact-kv-without-txlog!
+              lmdb
+              (mapv (fn [[k v]]
+                      (lmdb/kv-tx :put c/kv-info k v :keyword :data))
+                    wal-opts))))))))
 
 (defn- open-dbis
   [lmdb]
