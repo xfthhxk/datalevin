@@ -1,10 +1,13 @@
 (ns datalevin.test.issues
   (:require
+   [datalevin.binding.cpp :as cpp]
    [datalevin.core :as d]
+   [datalevin.kv :as kv]
    [datalevin.test.core :as tdc :refer [db-fixture]]
    [clojure.test :refer [deftest testing is use-fixtures]]
    [datalevin.util :as u])
   (:import
+   [datalevin.storage Store]
    [java.util UUID]))
 
 (use-fixtures :each db-fixture)
@@ -20,3 +23,19 @@
            #{["A" ["A"]] ["B" ["B"]]}))
     (d/close-db db)
     (u/delete-files dir)))
+
+(deftest issue-366-stale-cursor-after-reader-close
+  (let [dir    (u/tmp-dir (str "stale-reader-cursor-" (UUID/randomUUID)))
+        schema {:name {:db/valueType   :db.type/string
+                       :db/cardinality :db.cardinality/one}}
+        query  '[:find [?name ...] :where [?e :name ?name]]
+        conn   (d/get-conn dir schema)]
+    (try
+      (d/transact! conn [{:db/id -1 :name "first"}])
+      (is (= #{"first"} (set (d/q query @conn))))
+      (cpp/invalidate-thread-reader!
+        (kv/raw-lmdb (.-lmdb ^Store (:store @conn))))
+      (is (= #{"first"} (set (d/q query @conn))))
+      (finally
+        (d/close conn)
+        (u/delete-files dir)))))

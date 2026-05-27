@@ -9,7 +9,7 @@ import java.nio.Buffer;
 import java.nio.ByteBuffer;
 
 @SuppressWarnings("removal")
-final class UnsafeAccess {
+public final class UnsafeAccess {
 
     static Unsafe UNSAFE = null;
     static Method INVOKE_CLEANER = null;
@@ -46,7 +46,7 @@ final class UnsafeAccess {
         return available;
     }
 
-    static void clean(final ByteBuffer buffer) {
+    public static void clean(final ByteBuffer buffer) {
         if (!available || INVOKE_CLEANER == null || buffer == null || !buffer.isDirect()) {
             return;
         }

@@ -35,12 +35,14 @@
     DTLV$dtlv_list_iter DTLV$dtlv_list_key_range_full_val_iter
     DTLV$dtlv_list_rank_sample_iter DTLV$dtlv_list_val_full_iter DTLV$MDB_val
     DTLV$dtlv_key_rank_sample_iter]
-   [datalevin.cpp BufVal Env Txn Dbi Cursor Stat Info Util Util$MapFullException]
+   [datalevin.cpp BufVal Env Txn Dbi Cursor Stat Info Util Util$MapFullException
+    UnsafeAccess]
    [datalevin.lmdb RangeContext KVTxData]
    [datalevin.async IAsyncWork]
    [datalevin.utl BitOps]
    [java.util.concurrent TimeUnit ScheduledExecutorService ScheduledFuture
     ConcurrentHashMap]
+   [java.util.concurrent.atomic AtomicBoolean]
    [java.lang AutoCloseable]
    [java.io File]
    [java.util Iterator HashMap ArrayDeque Map$Entry]
@@ -87,6 +89,9 @@
   (pool-add [_ x])
   (pool-take [_]))
 
+(defprotocol ICloseableResource
+  (close-resource! [_]))
+
 (deftype Pool [^ThreadLocal que]
   IPool
   (pool-add [_ x] (.add ^ArrayDeque (.get que) x))
@@ -99,6 +104,63 @@
             (get [_] (ArrayDeque.))))))
 
 (defn- new-bufval [size] (BufVal. size))
+
+(defn- close-txn-quiet!
+  [^Txn txn]
+  (when txn
+    (try
+      (.close txn)
+      (catch Exception _))))
+
+(defn- close-bufval-quiet!
+  [^BufVal bufval]
+  (when bufval
+    (try
+      (.close bufval)
+      (catch Throwable _))))
+
+(defn- clean-buffer-quiet!
+  [^ByteBuffer buffer]
+  (when buffer
+    (try
+      (UnsafeAccess/clean buffer)
+      (catch Throwable _))))
+
+(defn- close-cursor-quiet!
+  [^Cursor cur]
+  (when cur
+    (try
+      (.close cur)
+      (catch Throwable _))))
+
+(defn- bufval-open?
+  [^BufVal bufval]
+  (try
+    (some? (.ptr bufval))
+    (catch Throwable _ false)))
+
+(defn- cursor-open?
+  [^Cursor cur]
+  (and (bufval-open? (.key cur))
+       (bufval-open? (.val cur))))
+
+(defn- reusable-cursor
+  [^Pool curs ^Txn txn]
+  (loop []
+    (when-let [^Cursor cur (pool-take curs)]
+      (if-not (cursor-open? cur)
+        (do
+          (close-cursor-quiet! cur)
+          (recur))
+        (let [renewed (try
+                        (.renew cur txn)
+                        cur
+                        (catch Throwable _
+                          (close-cursor-quiet! cur)
+                          nil))]
+          (if renewed
+            renewed
+            (recur)))))))
 
 (defn- flag-value
   "flag key to int value, cover all flags"
@@ -180,7 +242,7 @@
       (.flip bf)
       (.reset vp))))
 
-(deftype Rtx [lmdb
+(deftype Rtx [^:unsynchronized-mutable lmdb
               ^Txn txn
               depth
               ^BufVal kp
@@ -189,9 +251,11 @@
               ^BufVal stop-kp
               ^BufVal start-vp
               ^BufVal stop-vp
-              ^ByteBuffer k-comp-bf
+              ^:unsynchronized-mutable ^ByteBuffer k-comp-bf
               ^:volatile-mutable ^ByteBuffer v-comp-bf
-              aborted?]
+              aborted?
+              ^AtomicBoolean closed?
+              ^boolean owns-buffers?]
 
   ICompress
   (key-bf [_] (.clear k-comp-bf))
@@ -235,7 +299,34 @@
     (when (zero? ^long @depth)
       (.renew txn))
     (vswap! depth u/long-inc)
-    this))
+    this)
+
+  AutoCloseable
+  (close [_]
+    (when (.compareAndSet closed? false true)
+      (let [txn*       txn
+            kp*        kp
+            vp*        vp
+            start-kp*  start-kp
+            stop-kp*   stop-kp
+            start-vp*  start-vp
+            stop-vp*   stop-vp
+            k-comp-bf* k-comp-bf
+            v-comp-bf* v-comp-bf]
+        (set! lmdb nil)
+        (set! k-comp-bf nil)
+        (set! v-comp-bf nil)
+        (close-txn-quiet! txn*)
+        (when owns-buffers?
+          (close-bufval-quiet! kp*)
+          (close-bufval-quiet! vp*)
+          (close-bufval-quiet! start-kp*)
+          (close-bufval-quiet! stop-kp*)
+          (close-bufval-quiet! start-vp*)
+          (close-bufval-quiet! stop-vp*)
+          (clean-buffer-quiet! k-comp-bf*)
+          (clean-buffer-quiet! v-comp-bf*))))
+    nil))
 
 (defn- v-bf
   [^BufVal vp lmdb rtx]
@@ -304,9 +395,13 @@
     (try
       (put-bufval vp x t (val-compressor lmdb) v-comp-bf)
       (catch BufferOverflowException _
-        (let [size (val-size x)]
+        (let [size          (val-size x)
+              old-vp        vp
+              old-v-comp-bf v-comp-bf]
           (set! vp (new-bufval size))
           (set! v-comp-bf (bf/allocate-buffer size))
+          (close-bufval-quiet! old-vp)
+          (clean-buffer-quiet! old-v-comp-bf)
           (set-max-val-size lmdb size)
           (put-bufval vp x t (val-compressor lmdb) v-comp-bf)))
       (catch Exception e
@@ -375,13 +470,29 @@
     (let [^Rtx rtx rtx
           ^Txn txn (.-txn rtx)]
       (or (when (.isReadOnly txn)
-            (when-let [^Cursor cur (pool-take curs)]
-              (.renew cur txn)
-              cur))
+            (reusable-cursor curs txn))
           (Cursor/create txn db (.-kp rtx) (.-vp rtx)))))
   (cursor-count [_ cur] (.count ^Cursor cur))
   (close-cursor [_ cur] (.close ^Cursor cur))
-  (return-cursor [_ cur] (pool-add curs cur)))
+  (return-cursor [_ cur] (pool-add curs cur))
+
+  ICloseableResource
+  (close-resource! [_]
+    (close-bufval-quiet! kp)
+    (close-bufval-quiet! vp)
+    (clean-buffer-quiet! k-comp-bf)
+    (clean-buffer-quiet! v-comp-bf)
+    (try
+      (.close db)
+      (catch Throwable _))
+    nil))
+
+(defn- close-dbi-quiet!
+  [^DBI dbi]
+  (when dbi
+    (try
+      (close-resource! dbi)
+      (catch Throwable _))))
 
 (defn- dtlv-bool [x] (if x DTLV/DTLV_TRUE DTLV/DTLV_FALSE))
 
@@ -696,17 +807,12 @@
                         (.me_mapsize ^DTLV$MDB_envinfo (.get info))))
     (.close info)))
 
-(defn- close-txn-quiet!
-  [^Txn txn]
-  (when txn
-    (try
-      (.close txn)
-      (catch Exception _))))
-
 (defn- close-rtx-quiet!
   [^Rtx rtx]
   (when rtx
-    (close-txn-quiet! (.-txn rtx))))
+    (try
+      (.close ^AutoCloseable rtx)
+      (catch Throwable _))))
 
 (defn- discard-thread-reader!
   [^ThreadLocal tl-reader ^ConcurrentHashMap reader-registry
@@ -768,7 +874,9 @@
                   (new-bufval c/+max-key-size+)
                   (bf/allocate-buffer c/+max-key-size+)
                   (bf/allocate-buffer max-val-size*)
-                  (volatile! false))]
+                  (volatile! false)
+                  (AtomicBoolean.)
+                  true)]
     (.set tl-reader rtx)
     (when-not (.isVirtual thread)
       (when-let [^Rtx old (.put reader-registry thread rtx)]
@@ -941,7 +1049,9 @@
                              stop-vp-w
                              k-comp-bf-w
                              v-comp-bf-w
-                             (volatile! false))))
+                             (volatile! false)
+                             (AtomicBoolean.)
+                             false)))
 
   IObj
   (withMeta [this m] (set! meta m) this)
@@ -962,6 +1072,9 @@
         (unregister-shutdown-hook! dir)
         (stop-scheduled-sync scheduled-sync)
         (close-reader-rtxs! reader-registry)
+        (when-let [^Rtx wtxn @write-txn]
+          (close-rtx-quiet! wtxn)
+          (vreset! write-txn nil))
         (.remove tl-reader)
         (let [dir-prefix (str (.env-dir this) u/+separator+)
               indices    (->> @l/vector-indices
@@ -977,6 +1090,21 @@
               (catch Throwable e
                 (when-not @close-error
                   (vreset! close-error e))))))
+        (doseq [^DBI db (.values dbis)]
+          (try
+            (close-dbi-quiet! db)
+            (catch Throwable e
+              (when-not @close-error
+                (vreset! close-error e)))))
+        (.clear dbis)
+        (close-bufval-quiet! kp-w)
+        (close-bufval-quiet! vp-w)
+        (close-bufval-quiet! start-kp-w)
+        (close-bufval-quiet! stop-kp-w)
+        (close-bufval-quiet! start-vp-w)
+        (close-bufval-quiet! stop-vp-w)
+        (clean-buffer-quiet! k-comp-bf-w)
+        (clean-buffer-quiet! v-comp-bf-w)
         (locking write-txn
           (try
             (.sync env 1)
@@ -1123,8 +1251,10 @@
   (return-rtx [this rtx]
     (when-not (.closed-kv? this)
       (if (.isVirtual (Thread/currentThread))
-        (do (.abort ^Txn (.-txn ^Rtx rtx))
-            (.remove tl-reader))
+        (try
+          (close-rtx-quiet! rtx)
+          (finally
+            (.remove tl-reader)))
         (.reset ^Rtx rtx))))
 
   (stat [_]
@@ -1575,9 +1705,13 @@
 (defn invalidate-thread-reader!
   [lmdb]
   (when (instance? CppLMDB lmdb)
-    (let [^ThreadLocal tl-reader (.-tl-reader ^CppLMDB lmdb)]
+    (let [^CppLMDB lmdb lmdb
+          ^ThreadLocal tl-reader (.-tl-reader lmdb)
+          ^ConcurrentHashMap reader-registry (.-reader-registry lmdb)
+          thread (Thread/currentThread)]
       (when-let [^Rtx rtx (.get tl-reader)]
-        (close-txn-quiet! (.-txn rtx))
+        (.remove reader-registry thread rtx)
+        (close-rtx-quiet! rtx)
         (.remove tl-reader))))
   nil)
 
