@@ -1755,23 +1755,42 @@
        (<= (long (or (:job/lease-until-ms job) 0))
            (long now-ms))))
 
+(defn- previously-failed-secondary-index-job?
+  [job]
+  (pos? (long (or (:job/attempts job) 0))))
+
 (defn- claimable-secondary-index-job?
-  [now-ms retry-failed? retry-due-only? job]
+  [now-ms retry-failed? retry-due-only? reclaim-failed-running? job]
   (or (si/pending-job? job)
       (expired-secondary-index-job-lease? now-ms job)
+      (and retry-failed?
+           reclaim-failed-running?
+           (si/running-job? job)
+           (previously-failed-secondary-index-job? job))
       (and retry-failed?
            (si/failed-job? job)
            (or (not retry-due-only?)
                (due-failed-secondary-index-job? now-ms job)))))
 
+(defn- secondary-index-job-matches?
+  [{:keys [tx type domain]} job]
+  (and (or (nil? tx)
+           (<= (long (:job/tx job)) (long tx)))
+       (or (nil? type)
+           (= type (:job/type job)))
+       (or (nil? domain)
+           (= domain (:job/domain job)))))
+
 (defn- claim-secondary-index-job!
-  [^Store store job owner lease-ms retry-failed? retry-due-only?]
+  [^Store store job owner lease-ms retry-failed? retry-due-only?
+   reclaim-failed-running?]
   (locking (.-write-txn store)
     (let [now-ms (System/currentTimeMillis)]
       (when-let [current (secondary-index-job store (:job/id job))]
         (when (claimable-secondary-index-job? now-ms
                                               retry-failed?
                                               retry-due-only?
+                                              reclaim-failed-running?
                                               current)
           (let [claimed (si/claimed-job current
                                         owner
@@ -1810,7 +1829,7 @@
 (defn process-secondary-index-jobs!
   ([^Store store]
    (process-secondary-index-jobs! store nil))
-  ([^Store store {:keys [max-jobs retry-due-only?]
+  ([^Store store {:keys [max-jobs retry-due-only? reclaim-failed-running?]
                   :or {max-jobs Long/MAX_VALUE}
                   :as opts}]
    (let [now-ms (System/currentTimeMillis)
@@ -1823,9 +1842,12 @@
          processable? #(claimable-secondary-index-job? now-ms
                                                        retry-failed?
                                                        retry-due-only?
+                                                       reclaim-failed-running?
                                                        %)
          jobs (take (long max-jobs)
-                    (filter processable? (secondary-index-jobs store)))
+                    (filter #(and (secondary-index-job-matches? opts %)
+                                  (processable? %))
+                            (secondary-index-jobs store)))
          result (volatile! {:processed-count 0
                             :claimed-count 0
                             :completed-count 0
@@ -1840,7 +1862,8 @@
                                                     owner
                                                     lease-ms
                                                     retry-failed?
-                                                    retry-due-only?)]
+                                                    retry-due-only?
+                                                    reclaim-failed-running?)]
          (do
            (inc-result! :claimed-count)
            (try
@@ -1857,15 +1880,6 @@
                  (inc-result! :skipped-count)))))
          (inc-result! :skipped-count)))
      (assoc @result :status (secondary-index-status store)))))
-
-(defn- secondary-index-job-matches?
-  [{:keys [tx type domain]} job]
-  (and (or (nil? tx)
-           (<= (long (:job/tx job)) (long tx)))
-       (or (nil? type)
-           (= type (:job/type job)))
-       (or (nil? domain)
-           (= domain (:job/domain job)))))
 
 (defn- unfinished-secondary-index-jobs
   [^Store store opts]
@@ -1885,8 +1899,10 @@
          poll-ms (max 1 (long poll-ms))
          deadline-ms (+ (System/currentTimeMillis) timeout-ms)
          opts (assoc opts :tx target-tx)
-         process-opts {:max-jobs (or max-jobs Long/MAX_VALUE)
-                       :retry-failed? retry-failed?}]
+         process-opts (merge (select-keys opts [:tx :type :domain])
+                             {:max-jobs (or max-jobs Long/MAX_VALUE)
+                              :retry-failed? retry-failed?
+                              :reclaim-failed-running? retry-failed?})]
      (loop []
        (when process?
          (process-secondary-index-jobs! store process-opts))
@@ -3007,6 +3023,8 @@
                         :background-sampling? c/*db-background-sampling?*
                         :async-secondary-index-worker-max-jobs
                         c/*async-secondary-index-worker-max-jobs*
+                        :async-secondary-index-worker-lease-ms
+                        c/*async-secondary-index-worker-lease-ms*
                         :async-secondary-index-retry-base-ms
                         c/*async-secondary-index-retry-base-ms*
                         :async-secondary-index-retry-max-ms
