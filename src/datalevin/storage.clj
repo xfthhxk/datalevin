@@ -2593,18 +2593,26 @@
             wal-opts     (into {}
                                (filter (fn [[k _]]
                                          (c/wal-option-key? k)))
-                               opts)]
+                               opts)
+            runtime-missing?
+            (some (fn [[k v]]
+                    (not= v (get runtime-opts k)))
+                  wal-opts)
+            persisted-missing?
+            (some (fn [[k v]]
+                    (not= v
+                          (get-value lmdb c/kv-info k :keyword :data)))
+                  wal-opts)]
+        (when (and info-v runtime-missing?)
+          (vswap! info-v merge wal-opts))
         (when (and info-v
-                   (some (fn [[k v]]
-                           (not= v (get runtime-opts k)))
-                         wal-opts))
-          (vswap! info-v merge wal-opts)
-          (when-not (contains? (or (get-env-flags lmdb) #{}) :rdonly)
-            (kv/transact-kv-without-txlog!
-              lmdb
-              (mapv (fn [[k v]]
-                      (lmdb/kv-tx :put c/kv-info k v :keyword :data))
-                    wal-opts))))))))
+                   persisted-missing?
+                   (not (contains? (or (get-env-flags lmdb) #{}) :rdonly)))
+          (kv/transact-kv-without-txlog!
+            lmdb
+            (mapv (fn [[k v]]
+                    (lmdb/kv-tx :put c/kv-info k v :keyword :data))
+                  wal-opts)))))))
 
 (defn- open-dbis
   [lmdb]

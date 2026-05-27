@@ -142,6 +142,10 @@
             (d/close conn))))
       (let [db (d/open-kv dir)]
         (try
+          (is (true? (i/get-value db c/kv-info :wal? :keyword :data)))
+          (is (= :strict
+                 (i/get-value db c/kv-info :wal-durability-profile
+                              :keyword :data)))
           (is (true? (:wal? (kv/txlog-watermarks db))))
           (is (= :strict (:durability-profile (kv/txlog-watermarks db))))
           (is (vector? (vec (kv/open-tx-log-rows db 1 1))))
