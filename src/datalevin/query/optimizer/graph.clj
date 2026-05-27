@@ -12,6 +12,7 @@
   (:require
    [clojure.set :as set]
    [datalevin.db :as db]
+   [datalevin.index :as idx]
    [datalevin.query.optimizer.range :as qor]
    [datalevin.query-util :as qu]
    [datalevin.util :as u :refer [raise]])
@@ -599,7 +600,14 @@
 (defn build-graph
   [deps context]
   (let [helpers {:make-call    (fn [f] (make-call deps f))
-                 :resolve-pred (fn [f ctx] (resolve-pred deps f ctx))}]
+                 :resolve-pred (fn [f ctx] (resolve-pred deps f ctx))
+                 :attr-value-type
+                 (fn [source attr]
+                   (when-let [source-db (get (:sources context) source)]
+                     (when (db/-searchable? source-db)
+                       (some-> (db/-schema source-db)
+                               (get attr)
+                               idx/value-type))))}]
     (-> context
         split-clauses
         ((fn [ctx] (init-graph deps ctx)))

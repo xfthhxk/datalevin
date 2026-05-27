@@ -232,6 +232,11 @@
        new-pred)
      old-pred)))
 
+(defn- bigdec-attr?
+  [helpers source attr]
+  (when-let [attr-value-type (:attr-value-type helpers)]
+    (identical? :db.type/bigdec (attr-value-type source attr))))
+
 (defn- optimize-like
   [helpers m pred [_ ^String pattern {:keys [escape]}] v not?]
   (let [pstring (like-pattern-as-string pattern escape)
@@ -315,8 +320,8 @@
                   (or (split-and-clauses arg) [arg]))
                 args)))))
 
-(defn- add-pred-clause
-  [helpers graph clause v]
+(defn- add-pred-clause-to-source
+  [helpers source nodes clause v]
   (let [pred        (first clause)
         and-clauses (split-and-clauses pred)
         preds       (or and-clauses [pred])
@@ -326,7 +331,11 @@
                           (update m :pred add-pred
                                   (nested-pred helpers f args v))
                           (case f
-                            (< <= > >=) (inequality->range m f args v)
+                            (< <= > >=)
+                            (if (bigdec-attr? helpers source (:attr m))
+                              (update m :pred add-pred
+                                      (activate-var-pred helpers v pred))
+                              (inequality->range m f args v))
                             =           (equality->range m args)
                             like        (optimize-like helpers m pred args v false)
                             not-like    (optimize-like helpers m pred args v true)
@@ -339,7 +348,14 @@
        (if (= (:var m) v)
          (reduce apply-pred m preds)
          m))
-     graph)))
+     nodes)))
+
+(defn- add-pred-clause
+  [helpers graph clause v]
+  (reduce-kv
+   (fn [graph source nodes]
+     (assoc graph source (add-pred-clause-to-source helpers source nodes clause v)))
+   {} graph))
 
 (defn- free->bound
   "Cases where free var can be rewritten as bound:
