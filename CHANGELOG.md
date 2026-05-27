@@ -74,6 +74,8 @@
 - [Datalog] Occasional stale DB meta data
   [#362](https://github.com/datalevin/datalevin/issues/362)
 - [Datalog] Do not pushdown `missing?`.
+- [KV] Leaking buffers of closed read only transactions
+  [#366](https://github.com/datalevin/datalevin/issues/366)
 
 ### Improved
 - [KV] nippy uses `ByteBuffer` internals that we contributed to gain about 17%-30%
