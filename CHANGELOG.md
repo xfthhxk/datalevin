@@ -1,6 +1,6 @@
 # Change Log
 
-## WIP
+## 0.10.17 (2026-05-27)
 ### Improved
 - [Lib] Added add-opens JVM options to JS and python libraries.
 - update deps.
