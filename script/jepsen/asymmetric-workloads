@@ -53,6 +53,7 @@ Environment overrides:
   DTLV_JEPSEN_ASYMMETRIC_MAX_WRITES_PER_KEY
   DTLV_JEPSEN_ASYMMETRIC_MIN_TXN_LENGTH
   DTLV_JEPSEN_ASYMMETRIC_MAX_TXN_LENGTH
+  DTLV_JEPSEN_SKIP_JAVAC
   DTLV_JEPSEN_PORT_RETRY_COUNT
   DTLV_JEPSEN_PORT_RETRY_DELAY_S
 EOF
@@ -150,6 +151,17 @@ run_jepsen() {
   done
 }
 
+ensure_java_classes() {
+  if [[ "${DTLV_JEPSEN_SKIP_JAVAC:-0}" == "1" ]]; then
+    return 0
+  fi
+
+  (
+    cd "$repo_root"
+    lein javac
+  )
+}
+
 selected_workloads=()
 extra_args=()
 
@@ -219,6 +231,7 @@ port_retry_count="${DTLV_JEPSEN_PORT_RETRY_COUNT:-2}"
 port_retry_delay_s="${DTLV_JEPSEN_PORT_RETRY_DELAY_S:-1}"
 
 mkdir -p "$log_dir"
+ensure_java_classes
 
 for workload in "${selected_workloads[@]}"; do
   workload_rate="$rate"
