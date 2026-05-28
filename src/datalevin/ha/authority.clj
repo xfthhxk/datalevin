@@ -189,12 +189,32 @@
          :ha-authority-read-ok? true
          :ha-authority-read-error nil))
 
+(defn ha-authority-read-fresh-timeout-ms
+  "Maximum age for a cached authority observation used by admission paths.
+
+  A cached read must not remain trusted for the whole lease timeout after the
+  renew loop stalls. Give it one scheduled renew interval plus the larger of
+  one more renew interval or the write-admission margin, capped by the actual
+  lease timeout."
+  ^long [m]
+  (let [lease-timeout-ms (long (or (:ha-lease-timeout-ms m)
+                                   c/*ha-lease-timeout-ms*))
+        renew-ms (long (or (:ha-lease-renew-ms m)
+                           c/*ha-lease-renew-ms*))
+        margin-ms (long (max 0
+                             (long (or (:ha-write-admission-lease-margin-ms m)
+                                       c/*ha-write-admission-lease-margin-ms*
+                                       0))))
+        timeout-ms (long (max 1
+                              (+ renew-ms
+                                 (max renew-ms margin-ms))))]
+    (long (min lease-timeout-ms timeout-ms))))
+
 (defn ha-authority-read-fresh?
   [m now-ms]
   (let [ok? (true? (:ha-authority-read-ok? m))
         last-ms (:ha-last-authority-refresh-ms m)
-        timeout-ms (long (or (:ha-lease-timeout-ms m)
-                             c/*ha-lease-timeout-ms*))]
+        timeout-ms (long (ha-authority-read-fresh-timeout-ms m))]
     (and ok?
          (or (not (integer? last-ms))
              (< (- (long now-ms) (long last-ms))
@@ -219,8 +239,16 @@
                   (not (ha-authority-read-fresh? m now-ms)))
          {:reason :authority-read-stale
           :last-authority-refresh-ms (:ha-last-authority-refresh-ms m)
-          :timeout-ms (long (or (:ha-lease-timeout-ms m)
-                                c/*ha-lease-timeout-ms*))})
+          :timeout-ms (ha-authority-read-fresh-timeout-ms m)
+          :lease-renew-ms (long (or (:ha-lease-renew-ms m)
+                                    c/*ha-lease-renew-ms*))
+          :lease-timeout-ms (long (or (:ha-lease-timeout-ms m)
+                                      c/*ha-lease-timeout-ms*))
+          :write-admission-margin-ms
+          (long (max 0
+                     (long (or (:ha-write-admission-lease-margin-ms m)
+                               c/*ha-write-admission-lease-margin-ms*
+                               0))))})
        (:ha-authority-read-error m)
        {:reason :authority-read-failed})))
 

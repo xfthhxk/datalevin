@@ -206,6 +206,34 @@
     (d/close conn)
     (u/delete-files dir)))
 
+(deftest test-wal-with-transaction-cas-with-lookup-ref
+  (let [dir    (u/tmp-dir (str "wal-cas-" (UUID/randomUUID)))
+        schema {:name {:db/unique :db.unique/identity}}
+        conn   (d/create-conn
+                 dir
+                 schema
+                 {:wal? true
+                  :wal-durability-profile :strict})]
+    (try
+      (d/transact! conn [{:db/id 1 :name "Petr" :age 31}])
+      (d/transact! conn [[:db/cas [:name "Petr"] :age 31 32]
+                         [:db/cas [:name "Petr"] :age 32 33]])
+      (is (= 33 (:age (d/entity @conn [:name "Petr"]))))
+      (d/close conn)
+      (let [conn' (d/create-conn
+                    dir
+                    schema
+                    {:wal? true
+                     :wal-durability-profile :strict})]
+        (try
+          (is (= 33 (:age (d/entity @conn' [:name "Petr"]))))
+          (finally
+            (d/close conn'))))
+      (finally
+        (when-not (d/closed? conn)
+          (d/close conn))
+        (u/delete-files dir)))))
+
 (deftest test-resolve-eid-1
   (let [dir    (u/tmp-dir (str "eid-" (UUID/randomUUID)))
         db     (d/empty-db

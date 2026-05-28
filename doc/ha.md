@@ -308,7 +308,11 @@ may have different leaders.
 ### No write admission without fresh local proof
 
 Datalevin does not extend a lease locally after renew failure. If the renew
-loop cannot maintain confidence, writes stop.
+loop cannot maintain confidence, writes stop. A cached authority read is trusted
+for at most one renew interval plus one additional renew interval (or the
+larger configured write-admission margin), capped by the lease timeout. With
+the defaults, a stalled renew is treated as stale after about 10 seconds from
+the last successful authority read, not after the full 15 second lease timeout.
 
 ### Membership drift is treated as unsafe
 
