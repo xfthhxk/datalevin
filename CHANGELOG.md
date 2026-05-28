@@ -1,5 +1,9 @@
 # Change Log
 
+## WIP
+### Fixed
+- [Vector] Missing embedding Java classes.
+
 ## 0.10.17 (2026-05-27)
 ### Improved
 - [Lib] Added add-opens JVM options to JS and python libraries.
@@ -9,23 +13,22 @@
 
 ### Added
 - [Server] High availability (HA) cluster with Raft consensus based auto
-  roll-over and promotion
-  [#72](https://github.com/datalevin/datalevin/issues/72). Details in
-  [doc](doc/ha.md).
+  roll-over and promotion. Details in [doc](doc/ha.md).
 - [Server] Operator-driven HA static membership updates via
   `datalevin.client/ha-update-membership!`, including authoritative
   membership-hash CAS update, optional control-plane voter replacement, and
   lease clearing.
-- [Server] Non-HA asynchronous read only replicas, This provides a simple
-  primary/read-only replica topology without automatic promotion, fencing, or
-  quorum. Details in [doc](doc/server.md#non-ha-async-read-replicas).
-  [Test] HA implementation comes with an extensive Jepsen test suite to validate
+- [Test] HA implementation comes with an extensive Jepsen test suite to validate
   correctness [#252](https://github.com/datalevin/datalevin/issues/252). Details
   in [doc](jepsen/README.md).
+- [Server] Non-HA asynchronous read only replicas, This provides a simple
+  primary/read-only replica topology without automatic promotion, fencing, or
+  quorum. Details in [doc](doc/server.md#non-ha-async-read-replicas)
+  [#72](https://github.com/datalevin/datalevin/issues/72).
 - [API] JSON API. [#182](https://github.com/datalevin/datalevin/issues/182)
 - [Lib] Release a lean embedded-use-only jar
-  `org.datalevin/datalevin-embedded:0.10.16` to **Clojars***. This jar does not
-  contain code for server/HA/pod and related dependencies.
+  `org.datalevin/datalevin-embedded:0.10.16` to **Clojars**. This jar does not
+  contain code for server/HA/CLI/pod and related dependencies.
 - [Lib] Release Datalevin as a Java library
   `org.datalevin:datalevin-java:0.10.16` to **Maven Central**, for embedded use.
 - [Lib] Release Datalevin as a Python library `datalevin` to **PyPI**, for embedded

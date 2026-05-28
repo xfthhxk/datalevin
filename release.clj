@@ -11,6 +11,7 @@
 (require '[clojure.string :as str])
 (require '[clojure.java.shell :as sh])
 (import '[java.time LocalDate])
+(import '[java.io File])
 
 (defn update-file [f fn]
   (print "Updating" (str f "...")) (flush)
@@ -22,6 +23,8 @@
 
 (def ^:dynamic *env* {})
 (def dtlvtest-dir "../dtlvtest")
+(def cljdoc-dir "../cljdoc")
+(def repo-dir (.getCanonicalPath (File. ".")))
 
 (defn sh [& args]
   (apply println "Running" (if (empty? *env*) "" (str :env " " *env*)) args)
@@ -57,7 +60,6 @@
     (update-file "bindings/javascript/package-lock.json" old->new)
     (update-file "bindings/python/pyproject.toml" old->new)
     (update-file "bindings/python/src/datalevin/__init__.py" old->new)
-    (update-file "bindings/python/src/datalevin.egg-info/PKG-INFO" old->new)
     (update-file "README.md" old->new)))
 
 (defn make-commit []
@@ -75,12 +77,27 @@
       "bindings/javascript/package-lock.json"
       "bindings/python/pyproject.toml"
       "bindings/python/src/datalevin/__init__.py"
-      "bindings/python/src/datalevin.egg-info/PKG-INFO"
       "README.md")
 
   (sh "git" "commit" "-m" (str "Version " new-v))
   (sh "git" "tag" "-l" new-v)
   (sh "git" "push" "origin" "master"))
+
+(defn cljdoc-check []
+  (println "\n\n[ Checking cljdoc analysis ]\n")
+  (when-not (.isDirectory (File. cljdoc-dir))
+    (throw (ex-info "Sibling cljdoc checkout not found"
+                    {:dir cljdoc-dir})))
+  (sh "lein" "with-profile" "core-release" "do" "clean," "pom," "jar")
+  (sh "clojure" "-T:build" "compile-java" :dir cljdoc-dir)
+  (sh "./script/cljdoc" "ingest"
+      "--project" "datalevin/datalevin"
+      "--version" new-v
+      "--jar" (str repo-dir "/target/datalevin-" new-v ".jar")
+      "--pom" (str repo-dir "/pom.xml")
+      "--git" repo-dir
+      "--rev" "HEAD"
+      :dir cljdoc-dir))
 
 (defn run-tests []
   (println "\n\n[ Running lein tests ]\n")
@@ -154,6 +171,7 @@
 (defn -main []
   (run-tests)
   (update-version)
+  (cljdoc-check)
   (make-commit)
   (github-release)
   (sh "./deploy" :dir "script")

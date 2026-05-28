@@ -4,9 +4,6 @@ height="140"></img></p>
 <p align="center"> 🧘 Simple, fast and versatile Datalog database for everyone
 💽 </p>
 <p align="center">
-<a href="https://cljdoc.org/d/datalevin/datalevin"><img
-src="https://cljdoc.org/badge/datalevin/datalevin" alt="datalevin on
-cljdoc"></img></a>
 <a href="https://clojars.org/datalevin"><img
 src="https://img.shields.io/clojars/v/datalevin.svg?color=success"
 alt="datalevin on clojars"></img></a>
@@ -25,9 +22,12 @@ src="https://raw.githubusercontent.com/babashka/babashka/master/logo/badge.svg"
 alt="bb compatible"></img></a>
 </p>
 <p align="center">
-<a href="https://github.com/datalevin/datalevin/actions"><img
-src="https://github.com/datalevin/datalevin/actions/workflows/release.binaries.yml/badge.svg"
-alt="datalevin linux/macos amd64 build status"></img></a>
+<a href="https://cljdoc.org/d/datalevin/datalevin"><img
+src="https://cljdoc.org/badge/datalevin/datalevin" alt="datalevin on
+cljdoc"></img></a>
+<a href="https://javadoc.io/doc/org.datalevin/datalevin-java/latest/"><img
+src="https://javadoc.io/badge2/org.datalevin/datalevin-java/javadoc.svg"
+alt="datalevin-java javadocs"></img></a>
 </p>
 
 > I love Datalog, why hasn't everyone used this already?

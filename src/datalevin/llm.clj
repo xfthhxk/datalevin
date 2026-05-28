@@ -13,7 +13,7 @@
    [clojure.string :as s]
    [datalevin.util :refer [raise]])
   (:import
-   [datalevin LlamaGenerator]
+   [datalevin.llm LlamaGenerator]
    [java.io File]
    [java.lang AutoCloseable]))
 

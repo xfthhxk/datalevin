@@ -16,7 +16,7 @@
    [jsonista.core :as json]
    [datalevin.util :as u :refer [raise]])
   (:import
-   [datalevin LlamaEmbedder]
+   [datalevin.llm LlamaEmbedder]
    [java.io InputStream]
    [java.lang AutoCloseable]
    [java.net URI]

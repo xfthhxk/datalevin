@@ -1,5 +1,8 @@
 package datalevin;
 
+import datalevin.llm.LlamaEmbedder;
+import datalevin.llm.LlamaGenerator;
+
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;

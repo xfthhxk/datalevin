@@ -1081,13 +1081,13 @@
             "allPublicMethods": true
         },
         {
-            "type": "datalevin.LlamaEmbedder",
+            "type": "datalevin.llm.LlamaEmbedder",
             "allPublicConstructors": true,
             "allDeclaredMethods": true,
             "allPublicMethods": true
         },
         {
-            "type": "datalevin.LlamaGenerator",
+            "type": "datalevin.llm.LlamaGenerator",
             "allPublicConstructors": true,
             "allDeclaredMethods": true,
             "allPublicMethods": true

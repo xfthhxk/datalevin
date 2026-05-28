@@ -58,7 +58,8 @@
   :profiles
   {:uberjar        {:main datalevin.main
                     :aot  [datalevin.main]}
-   :core-release   {:java-source-paths ^:replace ["src/java/datalevin/cpp"
+   :core-release   {:java-source-paths ^:replace ["src/java/datalevin/llm"
+                                                  "src/java/datalevin/cpp"
                                                   "src/java/datalevin/ha"
                                                   "src/java/datalevin/io"
                                                   "src/java/datalevin/utl"

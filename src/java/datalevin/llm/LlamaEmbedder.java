@@ -1,4 +1,4 @@
-package datalevin;
+package datalevin.llm;
 
 import datalevin.dtlvnative.DTLV;
 
