@@ -2,8 +2,8 @@
 
 The following benchmarks are included:
 
-* [Join Order Benchmark](JOB-bench) compares Datalevin and Postgresql on JOB
-  benchmark. This is a standard benchmark for SQL databases that consists of
+* [Join Order Benchmark](JOB-bench) compares Datalevin, SQLite and Postgresql on
+  JOB benchmark. This is a standard benchmark for SQL databases that consists of
   realistic data set (IMDB) and complex queries, and puts a high demand on the
   quality of query optimizer.
 * [LDBC-SNB Benchmark](LDBC-SNB-bench) compares Datalevin and Neo4j on an
