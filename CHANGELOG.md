@@ -1,6 +1,6 @@
 # Change Log
 
-## WIP
+## 0.10.18 (2026-05-27)
 ### Fixed
 - [Vector] Missing embedding Java classes.
 
