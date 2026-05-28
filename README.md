@@ -4,9 +4,6 @@ height="140"></img></p>
 <p align="center"> 🧘 Simple, fast and versatile Datalog database for everyone
 💽 </p>
 <p align="center">
-<a href="https://clojars.org/datalevin"><img
-src="https://img.shields.io/clojars/v/datalevin.svg?color=success"
-alt="datalevin on clojars"></img></a>
 <a href="https://central.sonatype.com/artifact/org.datalevin/datalevin-java"><img
 src="https://img.shields.io/maven-central/v/org.datalevin/datalevin-java.svg?color=success"
 alt="datalevin-java on maven central"></img></a>
@@ -16,18 +13,21 @@ alt="datalevin-node on npm"></img></a>
 <a href="https://pypi.org/project/datalevin/"><img
 src="https://img.shields.io/pypi/v/datalevin.svg?color=success"
 alt="datalevin on pypi"></img></a>
+<a href="https://clojars.org/datalevin"><img
+src="https://img.shields.io/clojars/v/datalevin.svg?color=success"
+alt="datalevin on clojars"></img></a>
 <a
 href="https://github.com/datalevin/datalevin/blob/master/doc/install.md#babashka-pod"><img
 src="https://raw.githubusercontent.com/babashka/babashka/master/logo/badge.svg"
 alt="bb compatible"></img></a>
 </p>
 <p align="center">
-<a href="https://cljdoc.org/d/datalevin/datalevin"><img
-src="https://cljdoc.org/badge/datalevin/datalevin" alt="datalevin on
-cljdoc"></img></a>
 <a href="https://javadoc.io/doc/org.datalevin/datalevin-java/latest/"><img
 src="https://javadoc.io/badge2/org.datalevin/datalevin-java/javadoc.svg"
 alt="datalevin-java javadocs"></img></a>
+<a href="https://cljdoc.org/d/datalevin/datalevin"><img
+src="https://cljdoc.org/badge/datalevin/datalevin" alt="datalevin on
+cljdoc"></img></a>
 </p>
 
 > I love Datalog, why hasn't everyone used this already?
@@ -128,13 +128,9 @@ articles and presentation:
 
 ## :truck: [Installation](doc/install.md)
 
-As a Clojure library, Datalevin is simple to add as a dependency to your Clojure
-project. There are also several other installation options. Please see details in
-[Installation Documentation](doc/install.md)
-
-For embedded-only JVM consumers, Clojars also publishes
-`org.datalevin/datalevin-embedded:0.10.18`, which keeps the local APIs and
-`datalevin.client` while trimming the server, HA, CLI, and babashka pod runtime.
+Datalevin is simple to add as a dependency to your project written in Java,
+Python, node.js or Clojure. There are also several other installation options.
+Please see details in [Installation Documentation](doc/install.md)
 
 ## :birthday: Upgrade
 
@@ -150,16 +146,14 @@ Datalevin is aimed to be a versatile database.
 
 ### Use as a Datalog store
 
-In addition to [our API doc](https://cljdoc.org/d/datalevin/datalevin),
+In addition to [Clojure API doc](https://cljdoc.org/d/datalevin/datalevin) and
+[JavaDoc](https://javadoc.io/doc/org.datalevin/datalevin-java/latest/datalevin/package-summary.html),
 Datalevin has almost the same Datalog API as
 [Datascript](https://github.com/tonsky/datascript), which in turn has almost the
 same API as Datomic®, please consult the abundant tutorials, guides and learning
 sites available online to learn about the usage of Datomic® flavor of Datalog.
-For descriptor-backed transaction/query UDFs and server-side runtime setup, see
-[Transactions](doc/transact.md), [Query](doc/query.md), and
-[Server](doc/server.md).
 
-Here is a simple code example using Datalevin:
+Here is a simple Clojure code example using Datalevin:
 
 ```clojure
 (require '[datalevin.core :as d])
@@ -296,10 +290,9 @@ for EDN data.
 
 ## :green_book: Documentation
 
-Please refer to the [API
-documentation](https://cljdoc.org/d/datalevin/datalevin) for more details.
-The [WAL guide](doc/wal.md) documents durability profiles, risk-window knobs,
-and WAL operational APIs.
+Please refer to [Clojure API doc](https://cljdoc.org/d/datalevin/datalevin) and
+[JavaDoc](https://javadoc.io/doc/org.datalevin/datalevin-java/latest/datalevin/package-summary.html),
+ for more details.
 
 ## :bar_chart: Benchmarks
 
@@ -384,8 +377,8 @@ reach as soon as we can. We may adjust the priorities based on feedback.
   vector database; counted and prefix compressed KV storage; auto upgrade
   migration; new rule engine.~~[Done 2026/01/22]
 * 1.0.0 ~~As a document database with automatic path indexing; WAL mode;
-  transaction log access API;~~  read-only replicas; high availability; JSON API;
-  library for Java, Python, and JavaScript;
+  transaction log access API;  read-only replicas; high availability; JSON API;
+  library for Java, Python, and JavaScript;~~ Book.
 * 1.1.0 TTL; extensible storage/query for arbitrary data; data compression.
 * 2.0.0 Incremental view maintenance.
 * 3.0.0 Extended rule syntax to handle complex analytical workload capable of
