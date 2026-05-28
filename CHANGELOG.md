@@ -1,5 +1,10 @@
 # Change Log
 
+## WIP
+### Improved
+- [Lib] Added add-opens JVM options to JS and python libraries.
+- update deps.
+
 ## 0.10.16 (2026-05-27)
 
 ### Added
@@ -18,15 +23,15 @@
   correctness [#252](https://github.com/datalevin/datalevin/issues/252). Details
   in [doc](jepsen/README.md).
 - [API] JSON API. [#182](https://github.com/datalevin/datalevin/issues/182)
-- [Lib] Release a trimmed down embedded-use-only jar
-  `org.datalevin/datalevin-embedded:<version>` to Clojars. This jar does not
+- [Lib] Release a lean embedded-use-only jar
+  `org.datalevin/datalevin-embedded:0.10.16` to **Clojars***. This jar does not
   contain code for server/HA/pod and related dependencies.
 - [Lib] Release Datalevin as a Java library
-  `org.datalevin:datalevin-java:<version>` to Maven Central, for embedded use.
-- [Lib] Release Datalevin as a Python library `datalevin` to PyPI, for embedded
+  `org.datalevin:datalevin-java:0.10.16` to **Maven Central**, for embedded use.
+- [Lib] Release Datalevin as a Python library `datalevin` to **PyPI**, for embedded
   use.
 - [Lib] Release Datalevin as a JavaScript Node.js library `datalevin-node` to
-  npm, for embedded use.
+  **npm**, for embedded use.
 - [Datalog] Allow registering a `:db/udf` to specify a user-defined function.
   This feature is language-agnostic, resolves in the runtime environment, and
   does not persist in DB. So a UDF can be written in Java, Python, or

@@ -1,10 +1,7 @@
-name: JavaScript Release
+name: JavaScript Package
 
 on:
   workflow_dispatch:
-  release:
-    types:
-      - created
 
 jobs:
   build-package:
@@ -12,7 +9,6 @@ jobs:
     runs-on: ubuntu-22.04
     permissions:
       contents: read
-      id-token: write
 
     steps:
       - name: Checkout repository
@@ -35,7 +31,6 @@ jobs:
           node-version: "24"
           cache: npm
           cache-dependency-path: bindings/javascript/package-lock.json
-          registry-url: https://registry.npmjs.org
 
       - name: Cache Clojure dependencies
         uses: actions/cache@v4
@@ -75,14 +70,12 @@ jobs:
         working-directory: bindings/javascript
         run: npm pack
 
+      - name: Smoke test npm package tarball
+        run: ./script/test-javascript-package bindings/javascript/datalevin-node-*.tgz
+
       - name: Upload npm package artifact
         uses: actions/upload-artifact@v4
         with:
           name: javascript-package
           path: bindings/javascript/datalevin-node-*.tgz
           if-no-files-found: error
-
-      - name: Publish to npm
-        if: github.event_name == 'release'
-        working-directory: bindings/javascript
-        run: npm publish --provenance --access public

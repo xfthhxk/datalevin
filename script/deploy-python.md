@@ -4,10 +4,10 @@ This document covers the manual release flow for the `datalevin` Python wheel.
 
 ## Scope
 
-This script builds and uploads the current-host wheel. It is useful for manual
-releases and local dry runs. The normal multi-platform Linux/macOS/Windows
-release still lives in the GitHub Actions workflows under
-`.github/workflows/release.python*.yml`.
+This script builds and optionally uploads the universal wheel. It is useful for
+local dry runs and explicit manual releases. The GitHub Actions workflow builds
+the same wheel and smoke-tests it on Linux/macOS/Windows, but it does not
+publish to PyPI or TestPyPI.
 
 ## Prerequisites
 
@@ -23,18 +23,9 @@ export TWINE_USERNAME=__token__
 export TWINE_PASSWORD=...
 ```
 
-If you need to override the wheel target tag, set:
-
-```bash
-export DATALEVIN_NATIVE_PLATFORM=linux-x86_64
-```
-
-Supported values are `linux-x86_64`, `linux-arm64`, `macosx-arm64`, and
-`windows-x86_64`.
-
 ## Dry Run
 
-Build the current-host wheel and run the smoke test:
+Build the universal wheel and run the smoke test:
 
 ```bash
 ./script/deploy-python --dry-run

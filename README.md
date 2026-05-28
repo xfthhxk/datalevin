@@ -10,6 +10,15 @@ cljdoc"></img></a>
 <a href="https://clojars.org/datalevin"><img
 src="https://img.shields.io/clojars/v/datalevin.svg?color=success"
 alt="datalevin on clojars"></img></a>
+<a href="https://central.sonatype.com/artifact/org.datalevin/datalevin-java"><img
+src="https://img.shields.io/maven-central/v/org.datalevin/datalevin-java.svg?color=success"
+alt="datalevin-java on maven central"></img></a>
+<a href="https://www.npmjs.com/package/datalevin-node"><img
+src="https://img.shields.io/npm/v/datalevin-node.svg?color=success"
+alt="datalevin-node on npm"></img></a>
+<a href="https://pypi.org/project/datalevin/"><img
+src="https://img.shields.io/pypi/v/datalevin.svg?color=success"
+alt="datalevin on pypi"></img></a>
 <a
 href="https://github.com/datalevin/datalevin/blob/master/doc/install.md#babashka-pod"><img
 src="https://raw.githubusercontent.com/babashka/babashka/master/logo/badge.svg"
@@ -19,7 +28,7 @@ alt="bb compatible"></img></a>
 <a href="https://github.com/datalevin/datalevin/actions"><img
 src="https://github.com/datalevin/datalevin/actions/workflows/release.binaries.yml/badge.svg"
 alt="datalevin linux/macos amd64 build status"></img></a>
-
+</p>
 
 > I love Datalog, why hasn't everyone used this already?
 
@@ -124,7 +133,7 @@ project. There are also several other installation options. Please see details i
 [Installation Documentation](doc/install.md)
 
 For embedded-only JVM consumers, Clojars also publishes
-`org.datalevin/datalevin-embedded:0.10.15`, which keeps the local APIs and
+`org.datalevin/datalevin-embedded:0.10.16`, which keeps the local APIs and
 `datalevin.client` while trimming the server, HA, CLI, and babashka pod runtime.
 
 ## :birthday: Upgrade

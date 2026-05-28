@@ -14,6 +14,13 @@ export const DATALEVIN_CLASSPATH_ENV = "DATALEVIN_CLASSPATH";
 export const DATALEVIN_JVM_ARGS_ENV = "DATALEVIN_JVM_ARGS";
 export const DATALEVIN_JAVACPP_CACHEDIR_ENV = "DATALEVIN_JAVACPP_CACHEDIR";
 export const DEFAULT_JAVACPP_CACHEDIR = "/tmp/datalevin-javacpp-cache";
+export const DEFAULT_JVM_ARGS = [
+  "--enable-native-access=ALL-UNNAMED",
+  "--add-opens=java.base/java.lang=ALL-UNNAMED",
+  "--add-opens=java.base/java.util=ALL-UNNAMED",
+  "--add-opens=java.base/java.nio=ALL-UNNAMED",
+  "--add-opens=java.base/sun.nio.ch=ALL-UNNAMED"
+];
 
 const TARGET_JAR_PATTERNS = [
   /^datalevin-runtime-.*\.jar$/,
@@ -125,13 +132,25 @@ function ensureJavacppCachedirArg(jvmArgs) {
   return jvmArgs;
 }
 
+function ensureDefaultJvmArgs(jvmArgs) {
+  for (const arg of DEFAULT_JVM_ARGS) {
+    if (!jvmArgs.includes(arg)) {
+      jvmArgs.push(arg);
+    }
+  }
+  return jvmArgs;
+}
+
 function resolveJvmArgs(jvmArgs = null) {
+  let resolved;
   if (jvmArgs && jvmArgs.length > 0) {
-    return ensureJavacppCachedirArg([...jvmArgs]);
+    resolved = [...jvmArgs];
+  } else {
+    const envArgs = process.env[DATALEVIN_JVM_ARGS_ENV];
+    resolved = splitShellWords(envArgs);
   }
 
-  const envArgs = process.env[DATALEVIN_JVM_ARGS_ENV];
-  return ensureJavacppCachedirArg(splitShellWords(envArgs));
+  return ensureJavacppCachedirArg(ensureDefaultJvmArgs(resolved));
 }
 
 export function resolveClasspath(classpath = null) {
@@ -314,5 +333,6 @@ export const __testing = {
   findRuntimeJars,
   splitShellWords,
   resolveJvmArgs,
+  ensureDefaultJvmArgs,
   ensureJavacppCachedirArg
 };

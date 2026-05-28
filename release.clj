@@ -50,10 +50,14 @@
     (update-file "test-jar/deps.edn" old->new)
     (update-file "test-jar/test-uber.sh" old->new)
     (update-file "doc/install.md" old->new)
-    (update-file "doc/embedded-release.md" old->new)
     (update-file "doc/dtlv.md" old->new)
     (update-file "examples/java/README.md" old->new)
     (update-file "src/datalevin/constants.clj" old->new)
+    (update-file "bindings/javascript/package.json" old->new)
+    (update-file "bindings/javascript/package-lock.json" old->new)
+    (update-file "bindings/python/pyproject.toml" old->new)
+    (update-file "bindings/python/src/datalevin/__init__.py" old->new)
+    (update-file "bindings/python/src/datalevin.egg-info/PKG-INFO" old->new)
     (update-file "README.md" old->new)))
 
 (defn make-commit []
@@ -64,10 +68,14 @@
       "test-jar/deps.edn"
       "test-jar/test-uber.sh"
       "doc/install.md"
-      "doc/embedded-release.md"
       "doc/dtlv.md"
       "examples/java/README.md"
       "src/datalevin/constants.clj"
+      "bindings/javascript/package.json"
+      "bindings/javascript/package-lock.json"
+      "bindings/python/pyproject.toml"
+      "bindings/python/src/datalevin/__init__.py"
+      "bindings/python/src/datalevin.egg-info/PKG-INFO"
       "README.md")
 
   (sh "git" "commit" "-m" (str "Version " new-v))

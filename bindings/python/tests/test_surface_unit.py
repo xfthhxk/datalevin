@@ -210,3 +210,19 @@ def test_preferred_runtime_jar_prefers_shared_runtime_and_latest_version(tmp_pat
         path.write_text("", encoding="utf-8")
 
     assert jvm_module._preferred_runtime_jar(tmp_path) == shared_new
+
+
+def test_default_jvm_args_are_injected(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv(jvm_module.DATALEVIN_JAVACPP_CACHEDIR_ENV, str(tmp_path))
+    args = ["-Xmx1g"]
+
+    jvm_module._ensure_default_jvm_args(args)
+    jvm_module._ensure_javacpp_cachedir_arg(args)
+
+    assert args[0] == "-Xmx1g"
+    assert "--enable-native-access=ALL-UNNAMED" in args
+    assert "--add-opens=java.base/java.lang=ALL-UNNAMED" in args
+    assert "--add-opens=java.base/java.util=ALL-UNNAMED" in args
+    assert "--add-opens=java.base/java.nio=ALL-UNNAMED" in args
+    assert "--add-opens=java.base/sun.nio.ch=ALL-UNNAMED" in args
+    assert f"-Dorg.bytedeco.javacpp.cachedir={tmp_path}" in args

@@ -48,6 +48,7 @@ TODO.txt
 .cljs_node_repl
 node_modules
 package-lock.json
+!bindings/javascript/package-lock.json
 reading
 /lib/
 /native/*/classes/
@@ -87,6 +88,7 @@ bindings/python/.venv/
 bindings/python/build/
 bindings/python/dist/
 bindings/python/src/*.egg-info/
+bindings/javascript/*.tgz
 bindings/python/src/*.dist-info/
 bindings/python/**/__pycache__/
 bindings/python/**/*.py[cod]

@@ -1,6 +1,24 @@
-# Installation
+# Datalevin Installation
 
 Datalevin can be installed with different methods, depending on how you plan to use it.
+
+## Platforms
+
+Supported platforms are:
+
+* Windows AMD64
+* MacOS ARM64
+* Linux AMD64
+* Linux ARM64
+
+## Languages
+
+Supported programming languages are:
+
+* Java
+* Javascript (Node.js)
+* Python
+* Clojure
 
 ## Clojure Library
 
@@ -22,11 +40,10 @@ If you use [Clojure CLI](https://clojure.org/guides/deps_and_cli) and
 {:deps {datalevin/datalevin {:mvn/version "0.10.16"}}}
 ```
 
-This library supports Java 21 and above.
-
-For embedded-only JVM use cases, Datalevin also publishes a trimmed artifact
-that keeps the local APIs and `datalevin.client`, bundles the native Datalevin
-libraries, and excludes the server, HA, CLI, and babashka pod runtime code.
+The above library is a full release that includes everything. For embedded-only
+use cases, a lean artifact is available that keeps the local APIs and
+`datalevin.client` and excludes the server, CLI, and babashka pod runtime
+code.
 
 If you use Leiningen:
 
@@ -40,10 +57,67 @@ If you use Clojure CLI:
 {:deps {org.datalevin/datalevin-embedded {:mvn/version "0.10.16"}}}
 ```
 
-See [embedded release notes](embedded-release.md) for the packaging and release
-workflow.
+This library supports Java 21 and above.
 
-### Native Dependencies
+## Java Library
+
+Java users can use the Maven Central artifact `org.datalevin:datalevin-java`.
+It includes the Java API, Datalevin runtime, and bundled native Datalevin
+libraries for supported platforms. It requires Java 21 and above.
+
+Maven:
+
+```xml
+<dependency>
+  <groupId>org.datalevin</groupId>
+  <artifactId>datalevin-java</artifactId>
+  <version>0.10.16</version>
+</dependency>
+```
+
+Gradle:
+
+```kotlin
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    implementation("org.datalevin:datalevin-java:0.10.16")
+}
+```
+
+See the [Java example](../examples/java/README.md) for a Datalog quick start.
+
+## JavaScript Library
+
+Node.js users can use the npm package
+[`datalevin-node`](https://www.npmjs.com/package/datalevin-node). It vendors
+the shared Datalevin runtime jar, so normal usage does not require building
+Datalevin from source. It requires Node.js 20+ and Java 21+.
+
+```bash
+npm install datalevin-node
+```
+
+See the [Node binding README](../bindings/javascript/README.md) for Datalog and
+KV examples.
+
+## Python Library
+
+Python users can install the PyPI package
+[`datalevin`](https://pypi.org/project/datalevin/). It vendors the shared
+Datalevin runtime jar, so normal usage does not require building Datalevin from
+source. It requires Python 3.10+ and Java 21+.
+
+```bash
+pip install datalevin
+```
+
+See the [Python binding README](../bindings/python/README.md) for Datalog and
+KV examples.
+
+## Native Dependencies
 
 If the native dependencies of Datalevin are not met, Datalevin may fail to load
 and report `java.lang.UnsatisfiedLinkError`.
@@ -62,24 +136,9 @@ yourself:
 * MacOSX needs the same libraries as the above from Clang, e.g. `brew
   install libomp llvm`
 
-### Unreleased Code
+## JVM Options
 
-The `master` branch of this project is kept fully functional, so if you
-need to use some yet-to-be released fixes or features, you can declare the
-dependency in `deps.edn` (remember to change the `:sha`):
-
-```Clojure
-{:deps {datalevin/datalevin
-        {:git/url "https://github.com/datalevin/datalevin.git"
-         :sha "d3251eb29e4b6baf6cce6c161f6f585c7a61acbc"}}}
-```
-Make sure to go to `~/.gitlibs/libs/datalevin/datalevin/$SHA` and run `lein test` to
-compile and run tests first.
-
-### Performance Tip
-
-To obtain better performance (about 5% to 20%), you may
-want to add the following JVM options to your project:
+You also want to add the following JVM options to your Java/Clojure project:
 ```
 --add-opens=java.base/java.nio=ALL-UNNAMED
 --add-opens=java.base/sun.nio.ch=ALL-UNNAMED
@@ -102,6 +161,8 @@ For `dep.edn`, this is known to work:
 ```
 Then `clj -A:jvm-base`
 
+Python and Javascript libraries have added these options automatically.
+
 ### Java 24 and above
 
 You want to add `--enable-native-access=ALL-UNNAMED` JVM options to disable
@@ -109,12 +170,24 @@ warnings about native access.
 
 ### Other JVM Languages
 
-Datalevin can be used in other JVM languages than Clojure, such as Java, Scala, Kotlin,
-and so on, by using the official [Clojure Java
-API](http://clojure.github.io/clojure/javadoc/clojure/java/api/package-summary.html).
-If you have done so, a PR to document your example will be welcome here. In
-addition, one can build a Datalevin wrapper in other JVM languages this way, and
-we will be happy to link to it here if you have done so.
+Datalevin can be used in other JVM languages than Clojure and Java, such as
+Scala, Kotlin, and so on, by wrapping the Java library. If you have done so, we
+will be happy to link to it here if you have done so.
+
+## Unreleased Code
+
+The `master` branch of this project is kept fully functional, so if you
+need to use some yet-to-be released fixes or features, you can declare the
+dependency in `deps.edn` (remember to change the `:sha`):
+
+```Clojure
+{:deps {datalevin/datalevin
+        {:git/url "https://github.com/datalevin/datalevin.git"
+         :sha "d3251eb29e4b6baf6cce6c161f6f585c7a61acbc"}}}
+```
+Make sure to go to `~/.gitlibs/libs/datalevin/datalevin/$SHA` and run `lein test` to
+compile and run tests first.
+
 
 ## Command Line Tool
 

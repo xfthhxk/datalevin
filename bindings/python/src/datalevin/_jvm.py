@@ -23,6 +23,13 @@ TARGET_JAR_PATTERNS = (
     "datalevin-java-*.jar",
 )
 DEFAULT_JAVACPP_CACHEDIR = Path("/tmp/datalevin-javacpp-cache")
+DEFAULT_JVM_ARGS = (
+    "--enable-native-access=ALL-UNNAMED",
+    "--add-opens=java.base/java.lang=ALL-UNNAMED",
+    "--add-opens=java.base/java.util=ALL-UNNAMED",
+    "--add-opens=java.base/java.nio=ALL-UNNAMED",
+    "--add-opens=java.base/sun.nio.ch=ALL-UNNAMED",
+)
 
 
 def jvm_started() -> bool:
@@ -77,6 +84,7 @@ def start_jvm(
         env_args = os.environ.get(DATALEVIN_JVM_ARGS_ENV)
         if env_args:
             resolved_jvm_args = shlex.split(env_args)
+    _ensure_default_jvm_args(resolved_jvm_args)
     _ensure_javacpp_cachedir_arg(resolved_jvm_args)
 
     try:
@@ -141,3 +149,9 @@ def _ensure_javacpp_cachedir_arg(jvm_args: list[str]) -> None:
     cache_dir = Path(os.environ.get(DATALEVIN_JAVACPP_CACHEDIR_ENV, DEFAULT_JAVACPP_CACHEDIR))
     cache_dir.mkdir(parents=True, exist_ok=True)
     jvm_args.append(f"-Dorg.bytedeco.javacpp.cachedir={cache_dir}")
+
+
+def _ensure_default_jvm_args(jvm_args: list[str]) -> None:
+    for arg in DEFAULT_JVM_ARGS:
+        if arg not in jvm_args:
+            jvm_args.append(arg)

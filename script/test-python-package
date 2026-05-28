@@ -1,0 +1,132 @@
+#!/bin/bash
+
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: ./script/test-python-package [--python <bin>] [wheel-file]
+
+Install a built Datalevin wheel into a fresh virtualenv and run a smoke test
+from outside the repository package paths.
+
+Options:
+  --python <bin> Python interpreter to use. Defaults to PYTHON_BIN or python.
+  --help         Show this message.
+EOF
+}
+
+repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+cd "$repo_root"
+
+python_bin=${PYTHON_BIN:-}
+if [[ -z "$python_bin" ]]; then
+  if command -v python >/dev/null 2>&1; then
+    python_bin=python
+  else
+    python_bin=python3
+  fi
+fi
+wheel_path=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --python)
+      shift
+      if [[ $# -eq 0 ]]; then
+        echo "--python requires a value." >&2
+        exit 1
+      fi
+      python_bin=$1
+      ;;
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    -*)
+      echo "Unknown option: $1" >&2
+      usage >&2
+      exit 1
+      ;;
+    *)
+      if [[ -n "$wheel_path" ]]; then
+        echo "Only one wheel file can be tested at a time." >&2
+        exit 1
+      fi
+      wheel_path=$1
+      ;;
+  esac
+  shift
+done
+
+command -v "$python_bin" >/dev/null 2>&1 || {
+  echo "Python interpreter not found: $python_bin" >&2
+  exit 1
+}
+
+if [[ -z "$wheel_path" ]]; then
+  shopt -s nullglob
+  wheels=(bindings/python/dist/datalevin-*.whl)
+  shopt -u nullglob
+  if [[ ${#wheels[@]} -ne 1 ]]; then
+    echo "Expected exactly one wheel in bindings/python/dist, found ${#wheels[@]}." >&2
+    exit 1
+  fi
+  wheel_path=${wheels[0]}
+fi
+
+if [[ ! -f "$wheel_path" ]]; then
+  echo "Wheel not found: $wheel_path" >&2
+  exit 1
+fi
+
+wheel_dir=$(cd "$(dirname "$wheel_path")" && pwd)
+wheel_path="${wheel_dir}/$(basename "$wheel_path")"
+test_root=$(mktemp -d "${TMPDIR:-/tmp}/datalevin-python-package.XXXXXX")
+trap 'rm -rf "$test_root"' EXIT
+
+"$python_bin" -m venv "$test_root/venv"
+smoke_python="$test_root/venv/bin/python"
+if [[ ! -x "$smoke_python" ]]; then
+  smoke_python="$test_root/venv/Scripts/python.exe"
+fi
+
+"$smoke_python" -m pip install --upgrade pip
+"$smoke_python" -m pip install "$wheel_path"
+
+cat > "$test_root/smoke.py" <<'PY'
+from __future__ import annotations
+
+import os
+import tempfile
+from pathlib import Path
+
+import datalevin
+from datalevin import api_info, connect, open_kv
+
+repo_root = Path(os.environ["DATALEVIN_REPO_ROOT"]).resolve()
+package_file = Path(datalevin.__file__).resolve()
+if package_file.is_relative_to(repo_root):
+    raise AssertionError(f"imported repository source instead of installed wheel: {package_file}")
+
+info = api_info()
+assert "datalevin-version" in info
+
+with tempfile.TemporaryDirectory(prefix="dtlv-python-package-") as tmp:
+    db_dir = Path(tmp) / "db"
+    with connect(str(db_dir), schema={":name": {":db/valueType": ":db.type/string"}}) as conn:
+        conn.transact([{":db/id": -1, ":name": "Ada"}])
+        assert conn.query("[:find [?name ...] :where [?e :name ?name]]") == ["Ada"]
+
+    kv_dir = Path(tmp) / "kv"
+    with open_kv(str(kv_dir)) as kv:
+        kv.open_dbi("items")
+        kv.transact([(":put", 1, "a")], dbi_name="items", k_type=":long", v_type=":string")
+        assert kv.get_range("items", [":all"], k_type=":long", v_type=":string") == [[1, "a"]]
+
+print(f"Datalevin Python package smoke test passed: {datalevin.__version__}")
+PY
+
+(
+  cd "$test_root"
+  DATALEVIN_REPO_ROOT="$repo_root" "$smoke_python" smoke.py
+)

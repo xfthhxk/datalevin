@@ -34,4 +34,4 @@ __all__ = [
     "start_jvm",
 ]
 
-__version__ = "0.10.15"
+__version__ = "0.10.16"

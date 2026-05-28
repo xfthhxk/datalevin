@@ -1,0 +1,150 @@
+#!/bin/bash
+
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: ./script/deploy-packages [options]
+
+Publish Datalevin packages that are not covered by the Clojars embedded/core
+deploy script: Java to Maven Central, JavaScript to npm, and Python to PyPI.
+
+Options:
+  --dry-run              Build all packages and skip uploads.
+  --skip-java            Do not run script/deploy-java.
+  --skip-javascript      Do not run script/deploy-javascript.
+  --skip-python          Do not run script/deploy-python.
+
+  --java-automatic       Publish Java automatically in Sonatype Central.
+  --java-user-managed    Upload Java for manual review in Sonatype Central.
+  --java-no-sign         Build the Java Central bundle without GPG signatures.
+
+  --skip-js-install      Forward to script/deploy-javascript.
+  --skip-js-tests        Forward to script/deploy-javascript.
+  --npm-tag <tag>        Publish npm package under a non-default dist-tag.
+  --npm-otp <code>       Pass a one-time password to npm publish.
+  --npm-provenance       Publish npm package with provenance.
+
+  --python-testpypi      Upload Python wheel to TestPyPI instead of PyPI.
+  --skip-python-smoke    Forward to script/deploy-python.
+  --python <bin>         Python interpreter for script/deploy-python.
+  --help                 Show this message.
+
+Environment:
+  Uses the same credentials as the underlying deploy scripts:
+  SONATYPE_CENTRAL_*, JAVA_GPG_*, NODE_AUTH_TOKEN, TWINE_USERNAME,
+  and TWINE_PASSWORD.
+EOF
+}
+
+repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+cd "$repo_root"
+
+dry_run=false
+skip_java=false
+skip_javascript=false
+skip_python=false
+java_args=()
+javascript_args=()
+python_args=()
+
+require_value() {
+  local option=$1
+  shift
+  if [[ $# -eq 0 ]]; then
+    echo "${option} requires a value." >&2
+    exit 1
+  fi
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --dry-run)
+      dry_run=true
+      ;;
+    --skip-java)
+      skip_java=true
+      ;;
+    --skip-javascript)
+      skip_javascript=true
+      ;;
+    --skip-python)
+      skip_python=true
+      ;;
+    --java-automatic)
+      java_args+=(--automatic)
+      ;;
+    --java-user-managed)
+      java_args+=(--user-managed)
+      ;;
+    --java-no-sign)
+      java_args+=(--no-sign)
+      ;;
+    --skip-js-install)
+      javascript_args+=(--skip-install)
+      ;;
+    --skip-js-tests)
+      javascript_args+=(--skip-tests)
+      ;;
+    --npm-tag)
+      shift
+      require_value --npm-tag "$@"
+      javascript_args+=(--tag "$1")
+      ;;
+    --npm-otp)
+      shift
+      require_value --npm-otp "$@"
+      javascript_args+=(--otp "$1")
+      ;;
+    --npm-provenance)
+      javascript_args+=(--provenance)
+      ;;
+    --python-testpypi)
+      python_args+=(--testpypi)
+      ;;
+    --skip-python-smoke)
+      python_args+=(--skip-smoke)
+      ;;
+    --python)
+      shift
+      require_value --python "$@"
+      python_args+=(--python "$1")
+      ;;
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown option: $1" >&2
+      usage >&2
+      exit 1
+      ;;
+  esac
+  shift
+done
+
+if [[ "$dry_run" == true ]]; then
+  java_args+=(--dry-run)
+  javascript_args+=(--dry-run)
+  python_args+=(--dry-run)
+fi
+
+run_step() {
+  local label=$1
+  shift
+  echo
+  echo "[ ${label} ]"
+  "$@"
+}
+
+if [[ "$skip_java" != true ]]; then
+  run_step "Java package" ./script/deploy-java "${java_args[@]}"
+fi
+
+if [[ "$skip_javascript" != true ]]; then
+  run_step "JavaScript package" ./script/deploy-javascript "${javascript_args[@]}"
+fi
+
+if [[ "$skip_python" != true ]]; then
+  run_step "Python package" ./script/deploy-python "${python_args[@]}"
+fi

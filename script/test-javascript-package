@@ -1,0 +1,146 @@
+#!/bin/bash
+
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: ./script/test-javascript-package [tarball-file]
+
+Install a built datalevin-node npm tarball into a fresh consumer project and
+run a smoke test from outside the repository package paths.
+
+Options:
+  --help  Show this message.
+EOF
+}
+
+repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+cd "$repo_root"
+
+tarball_path=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    -*)
+      echo "Unknown option: $1" >&2
+      usage >&2
+      exit 1
+      ;;
+    *)
+      if [[ -n "$tarball_path" ]]; then
+        echo "Only one tarball file can be tested at a time." >&2
+        exit 1
+      fi
+      tarball_path=$1
+      ;;
+  esac
+  shift
+done
+
+command -v node >/dev/null 2>&1 || {
+  echo "Node.js is required." >&2
+  exit 1
+}
+command -v npm >/dev/null 2>&1 || {
+  echo "npm is required." >&2
+  exit 1
+}
+
+if [[ -z "$tarball_path" ]]; then
+  shopt -s nullglob
+  tarballs=(bindings/javascript/datalevin-node-*.tgz)
+  shopt -u nullglob
+  if [[ ${#tarballs[@]} -ne 1 ]]; then
+    echo "Expected exactly one tarball in bindings/javascript, found ${#tarballs[@]}." >&2
+    exit 1
+  fi
+  tarball_path=${tarballs[0]}
+fi
+
+if [[ ! -f "$tarball_path" ]]; then
+  echo "Tarball not found: $tarball_path" >&2
+  exit 1
+fi
+
+tarball_dir=$(cd "$(dirname "$tarball_path")" && pwd)
+tarball_path="${tarball_dir}/$(basename "$tarball_path")"
+test_root=$(mktemp -d "${TMPDIR:-/tmp}/datalevin-node-package.XXXXXX")
+trap 'rm -rf "$test_root"' EXIT
+
+cat > "$test_root/package.json" <<'JSON'
+{
+  "type": "module",
+  "private": true
+}
+JSON
+
+cat > "$test_root/smoke.mjs" <<'JS'
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
+import {
+  apiInfo,
+  connect,
+  openKv
+} from "datalevin-node";
+
+async function main() {
+  const info = await apiInfo();
+  assert.equal(typeof info["datalevin-version"], "string");
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dtlv-node-package-"));
+  const conn = await connect(path.join(dir, "db"), {
+    schema: {
+      ":name": {
+        ":db/valueType": ":db.type/string",
+        ":db/unique": ":db.unique/identity"
+      }
+    }
+  });
+
+  try {
+    await conn.transact([{ ":db/id": -1, ":name": "Ada" }]);
+    assert.deepEqual(await conn.query("[:find [?name ...] :where [?e :name ?name]]"), ["Ada"]);
+  } finally {
+    await conn.close();
+  }
+
+  const kv = await openKv(path.join(dir, "kv"));
+  try {
+    await kv.openDbi("items");
+    await kv.transact([[":put", 1, "a"]], {
+      dbiName: "items",
+      kType: ":long",
+      vType: ":string"
+    });
+    const items = await kv.getRange("items", [":all"], {
+      kType: ":long",
+      vType: ":string"
+    });
+    assert.deepEqual(items.map(([key, value]) => [Number(key), value]), [[1, "a"]]);
+  } finally {
+    await kv.close();
+  }
+
+  console.log(`Datalevin Node package smoke test passed: ${info["datalevin-version"]}`);
+}
+
+main()
+  .then(() => setImmediate(() => process.exit(0)))
+  .catch((error) => {
+    console.error(error);
+    process.exit(1);
+  });
+JS
+
+(
+  cd "$test_root"
+  npm install "$tarball_path"
+  node smoke.mjs
+)

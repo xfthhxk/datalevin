@@ -5,7 +5,8 @@
             [clojure.tools.build.api :as b])
   (:import [java.io File InputStream]
            [java.security MessageDigest]
-           [java.util.jar JarFile]))
+           [java.util.jar JarFile]
+           [java.util.zip ZipEntry ZipOutputStream]))
 
 (def class-dir "target/classes")
 (def java-release-dir "target/java-release")
@@ -715,17 +716,28 @@
       {:artifact-dir artifact-dir
        :artifacts    artifact-paths})))
 
+(defn- zip-directory!
+  [source-dir zip-file]
+  (.mkdirs (.getParentFile (File. zip-file)))
+  (with-open [out (ZipOutputStream. (io/output-stream zip-file))]
+    (let [root-path (.toPath (File. source-dir))]
+      (doseq [^File file (->> (file-seq (File. source-dir))
+                              (filter #(.isFile ^File %))
+                              (sort-by #(.getPath ^File %)))]
+        (let [entry-name (-> (str (.relativize root-path (.toPath file)))
+                             (str/replace File/separator "/"))
+              entry      (ZipEntry. entry-name)]
+          (.putNextEntry out entry)
+          (with-open [in (io/input-stream file)]
+            (io/copy in out))
+          (.closeEntry out))))))
+
 (defn central-java-bundle
   [{:keys [sign]
     :or   {sign true}}]
   (bundle-artifacts! {:sign? sign})
   (b/delete {:path java-central-bundle-file})
-  (run-process!
-    ["jar"
-     "--create"
-     "--file" java-central-bundle-file
-     "-C" java-central-staging-dir
-     "."])
+  (zip-directory! java-central-staging-dir java-central-bundle-file)
   (println "Generated Maven Central bundle at" java-central-bundle-file)
   {:bundle-file  java-central-bundle-file
    :artifact-dir (central-artifact-dir)

@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 import importlib.util
-import os
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
+from setuptools.dist import Distribution
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -21,42 +20,39 @@ def _load_setup_module():
     return module
 
 
-def test_build_native_platform_prefers_override() -> None:
+def test_bdist_wheel_is_universal() -> None:
     module = _load_setup_module()
-    with patch.dict(os.environ, {module.NATIVE_PLATFORM_ENV: "windows-x86_64"}):
-        assert module._build_native_platform("linux_x86_64") == "windows-x86_64"
+    command = module.bdist_wheel(Distribution())
+    with patch.object(module._bdist_wheel, "finalize_options"):
+        command.finalize_options()
+
+    assert command.root_is_pure is True
 
 
-def test_wheel_platform_tag_tracks_target_platform() -> None:
-    module = _load_setup_module()
-    assert module._wheel_platform_tag("linux-x86_64", "linux_x86_64") == "linux_x86_64"
-    assert module._wheel_platform_tag("windows-x86_64", "linux_x86_64") == "win_amd64"
-
-
-def test_build_native_platform_rejects_freebsd_amd64() -> None:
-    module = _load_setup_module()
-    with pytest.raises(module.DistutilsSetupError, match="Unsupported wheel platform"):
-        module._build_native_platform("freebsd_14_2_amd64")
-
-
-def test_build_native_platform_rejects_shared_all_runtime() -> None:
-    module = _load_setup_module()
-    with pytest.raises(module.DistutilsSetupError, match="Unsupported wheel platform"):
-        module._build_native_platform("all")
-
-
-def test_vendor_runtime_jar_uses_selected_platform() -> None:
+def test_vendor_runtime_jar_uses_all_platform_runtime() -> None:
     module = _load_setup_module()
     with patch("subprocess.run") as run:
-        module._vendor_runtime_jar("linux-arm64")
+        module._vendor_runtime_jar()
     run.assert_called_once_with(
         [
             "clojure",
             "-T:build",
             "vendor-jar",
             ":native-platform",
-            "linux-arm64",
+            "all",
         ],
         cwd=module.REPO_ROOT,
         check=True,
     )
+
+
+def test_clean_wheel_build_artifacts_removes_stale_build_lib(tmp_path) -> None:
+    module = _load_setup_module()
+    build_lib = tmp_path / "build" / "lib" / "datalevin" / "jars"
+    build_lib.mkdir(parents=True)
+    (build_lib / "datalevin-runtime-0.0.0.jar").write_text("")
+
+    with patch.object(module, "PACKAGE_ROOT", tmp_path):
+        module._clean_wheel_build_artifacts()
+
+    assert not (tmp_path / "build").exists()

@@ -31,6 +31,18 @@ test("splitShellWords handles quoted JVM args", () => {
   );
 });
 
+test("resolveJvmArgs injects Datalevin defaults", () => {
+  const args = __testing.resolveJvmArgs(["-Xmx1g"]);
+
+  assert.equal(args[0], "-Xmx1g");
+  assert.ok(args.includes("--enable-native-access=ALL-UNNAMED"));
+  assert.ok(args.includes("--add-opens=java.base/java.lang=ALL-UNNAMED"));
+  assert.ok(args.includes("--add-opens=java.base/java.util=ALL-UNNAMED"));
+  assert.ok(args.includes("--add-opens=java.base/java.nio=ALL-UNNAMED"));
+  assert.ok(args.includes("--add-opens=java.base/sun.nio.ch=ALL-UNNAMED"));
+  assert.ok(args.some((arg) => arg.startsWith("-Dorg.bytedeco.javacpp.cachedir=")));
+});
+
 test("resolveClasspath normalizes explicit classpath entries", () => {
   assert.deepEqual(resolveClasspath(["./target/example.jar"]), [path.resolve("./target/example.jar")]);
 });

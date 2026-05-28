@@ -188,30 +188,24 @@ pytest
 by default. To keep the cross-platform native payloads, pass
 `clojure -T:build vendor-jar :native-platform all`.
 
-Wheel builds do this automatically and produce platform-tagged wheels. The
-supported release path is wheel-only:
+Wheel builds do this automatically with the all-platform runtime jar and produce
+a universal `py3-none-any` wheel. The supported release path is wheel-only:
 
 ```bash
 python -m pip wheel --no-build-isolation bindings/python -w dist/
 ```
 
-Set `DATALEVIN_NATIVE_PLATFORM` to override the inferred target when building a
-wheel from a different platform tag. Supported values are `linux-x86_64`,
-`linux-arm64`, `macosx-arm64`, and `windows-x86_64`.
-
 FreeBSD users should use the platform's own package instead of the PyPI wheel.
 
-GitHub Actions release workflows are split the same way:
+`.github/workflows/release.python.yml` builds the universal wheel on demand,
+smoke-tests it on Linux amd64, Linux arm64, macOS arm64, and Windows amd64, then
+uploads the wheel as an artifact. It does not publish to PyPI or TestPyPI.
 
-- `.github/workflows/release.python.testpypi.yml` publishes a manual dry-run to
-  TestPyPI.
-- `.github/workflows/release.python.yml` publishes tagged releases to PyPI.
-
-For a local manual release helper, see
+For a local manual packaging helper, see
 [`script/deploy-python.md`](../../script/deploy-python.md).
 
-The hosted release workflows currently cover Linux amd64, Linux arm64, macOS
-arm64, and Windows amd64.
+The hosted package workflow currently smoke-tests Linux amd64, Linux arm64,
+macOS arm64, and Windows amd64.
 
 For ad hoc development against a different build, set `DATALEVIN_JAR` to point
 at another embeddable Datalevin runtime jar, preferably

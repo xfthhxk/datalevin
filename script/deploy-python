@@ -6,21 +6,20 @@ usage() {
   cat <<'EOF'
 Usage: ./script/deploy-python [--pypi|--testpypi] [--dry-run] [--skip-smoke] [--python <bin>]
 
-Build and publish the current-host Datalevin Python wheel.
+Build and publish the universal Datalevin Python wheel.
 
 Options:
   --pypi         Upload to PyPI. This is the default.
   --testpypi     Upload to TestPyPI.
   --dry-run      Build the wheel and stop before upload.
-  --skip-smoke   Skip the smoke-test venv install and pytest run.
+  --skip-smoke   Skip the isolated wheel install and package smoke test.
   --python <bin> Python interpreter to use. Defaults to PYTHON_BIN or python.
   --help         Show this message.
 
 Environment:
-  PYTHON_BIN                 Default Python interpreter.
-  DATALEVIN_NATIVE_PLATFORM  Override the inferred wheel target platform.
-  TWINE_USERNAME             PyPI username, commonly __token__.
-  TWINE_PASSWORD             PyPI or TestPyPI token.
+  PYTHON_BIN      Default Python interpreter.
+  TWINE_USERNAME  PyPI username, commonly __token__.
+  TWINE_PASSWORD  PyPI or TestPyPI token.
 EOF
 }
 
@@ -124,16 +123,10 @@ printf 'Built wheel(s):\n'
 printf '  %s\n' "${wheels[@]}"
 
 if [[ "$skip_smoke" != true ]]; then
-  smoke_root=$(mktemp -d "${TMPDIR:-/tmp}/datalevin-python-release.XXXXXX")
-  "$python_bin" -m venv "$smoke_root/venv"
-  smoke_python="$smoke_root/venv/bin/python"
-  if [[ ! -x "$smoke_python" ]]; then
-    smoke_python="$smoke_root/venv/Scripts/python.exe"
-  fi
-
-  echo "Smoke testing wheel(s) in an isolated virtualenv..."
-  "$smoke_python" -m pip install --upgrade pip pytest "${wheels[@]}"
-  "$smoke_python" -m pytest bindings/python/tests/test_smoke.py -q
+  echo "Smoke testing wheel(s) in isolated virtualenvs..."
+  for wheel in "${wheels[@]}"; do
+    ./script/test-python-package --python "$python_bin" "$wheel"
+  done
 fi
 
 if [[ "$dry_run" == true ]]; then
