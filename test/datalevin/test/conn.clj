@@ -1068,6 +1068,52 @@
       (finally
         (u/delete-files dir)))))
 
+(deftest test-wal-replay-preserves-lookup-ref-cas
+  (let [source-dir (u/tmp-dir (str "wal-replay-cas-source-"
+                                   (UUID/randomUUID)))
+        target-dir (u/tmp-dir (str "wal-replay-cas-target-"
+                                   (UUID/randomUUID)))
+        schema     {:identity/key   {:db/valueType :db.type/string
+                                      :db/unique :db.unique/identity}
+                    :identity/value {:db/valueType :db.type/long}}
+        opts       {:wal? true
+                    :wal-durability-profile :strict}]
+    (try
+      (let [source-conn (d/create-conn source-dir schema opts)
+            target-conn (d/create-conn target-dir schema opts)]
+        (try
+          (d/with-transaction [tx source-conn]
+            (d/transact! tx
+                         [{:db/id -1
+                           :identity/key "identity-1"
+                           :identity/value 0}]))
+          (d/with-transaction [tx source-conn]
+            (d/transact! tx
+                         [[:db/cas [:identity/key "identity-1"]
+                           :identity/value 0 1]
+                          [:db/cas [:identity/key "identity-1"]
+                           :identity/value 1 2]]))
+          (let [source-kv (.-lmdb ^Store (conn-store source-conn))
+                target-kv (.-lmdb ^Store (conn-store target-conn))
+                records   (kv/open-tx-log source-kv 1)]
+            (doseq [record records]
+              (kv/mirror-replayed-txlog-record! target-kv record))
+            (d/close target-conn)
+            (let [target-conn' (d/create-conn target-dir schema opts)]
+              (try
+                (is (= 2 (:identity/value
+                          (d/entity @target-conn'
+                                    [:identity/key "identity-1"]))))
+                (finally
+                  (d/close target-conn')))))
+          (finally
+            (d/close source-conn)
+            (when-not (d/closed? target-conn)
+              (d/close target-conn)))))
+      (finally
+        (u/delete-files source-dir)
+        (u/delete-files target-dir)))))
+
 (deftest test-wal-one-shot-write-uses-explicit-lmdb-write-transaction
   (let [dir  (u/tmp-dir (str "wal-one-shot-write-test-" (UUID/randomUUID)))
         ops* (atom [])]

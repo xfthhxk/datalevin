@@ -196,7 +196,7 @@
   renew loop stalls. Give it one scheduled renew interval plus the larger of
   one more renew interval or the write-admission margin, capped by the actual
   lease timeout."
-  ^long [m]
+  [m]
   (let [lease-timeout-ms (long (or (:ha-lease-timeout-ms m)
                                    c/*ha-lease-timeout-ms*))
         renew-ms (long (or (:ha-lease-renew-ms m)
