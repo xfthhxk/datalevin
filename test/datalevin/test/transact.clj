@@ -4,6 +4,7 @@
    [clojure.test :refer [deftest testing are is use-fixtures]]
    [datalevin.core :as d]
    [datalevin.datom :as dd]
+   [datalevin.interface :as iface]
    [datalevin.interpret :as i]
    [datalevin.udf :as udf]
    [datalevin.util :as u]
@@ -205,6 +206,37 @@
     (is (= 34 (:age (d/entity @conn [:name "Petr"]))))
     (d/close conn)
     (u/delete-files dir)))
+
+(deftest test-cas-cardinality-one-uses-validated-old-datom
+  (let [dir  (u/tmp-dir (str "cas-cardinality-one-" (UUID/randomUUID)))
+        conn (d/create-conn
+               dir
+               {:name {:db/unique :db.unique/identity}
+                :age  {:db/valueType :db.type/long}}
+               {:kv-opts {:flags (conj c/default-env-flags :nosync)}})]
+    (try
+      (d/transact! conn [{:db/id 1 :name "Petr" :age 31}])
+      (with-redefs [iface/ea-first-datom (fn [_ _ _] nil)]
+        (let [report (d/transact! conn [[:db/cas [:name "Petr"] :age 31 32]
+                                        [:db/cas [:name "Petr"] :age 32 33]])]
+          (is (= [[:age 31 false]
+                  [:age 32 true]
+                  [:age 32 false]
+                  [:age 33 true]]
+                 (mapv (fn [datom]
+                         [(dd/datom-a datom)
+                          (dd/datom-v datom)
+                          (dd/datom-added datom)])
+                       (:tx-data report))))))
+      (is (= #{["Petr" 33]}
+             (d/q '[:find ?name ?age
+                    :where
+                    [?e :name ?name]
+                    [?e :age ?age]]
+                  @conn)))
+      (finally
+        (d/close conn)
+        (u/delete-files dir)))))
 
 (deftest test-wal-with-transaction-cas-with-lookup-ref
   (let [dir    (u/tmp-dir (str "wal-cas-" (UUID/randomUUID)))

@@ -179,12 +179,15 @@
 
 (defn- build-op
   [case-id]
-  (let [f (rand-nth [:lookup-ref-same
-                     :tx-fn-after-add
-                     :tx-fn-twice
-                     :cas-chain
-                     :retract-add
-                     :tempid-ref])]
+  (let [f (or (some-> (System/getenv "DTLV_JEPSEN_INTERNAL_OP")
+                      not-empty
+                      keyword)
+              (rand-nth [:lookup-ref-same
+                         :tx-fn-after-add
+                         :tx-fn-twice
+                         :cas-chain
+                         :retract-add
+                         :tempid-ref]))]
     {:type             :invoke
      :f                f
      :value            nil

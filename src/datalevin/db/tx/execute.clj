@@ -258,6 +258,23 @@
   (let [tx (current-tx report)]
     (transact-report report (datom (.-e d) (.-a d) (.-v d) tx false))))
 
+(defn- transact-cas-cardinality-one
+  [report db store entity e a nv ^Datom old-datom]
+  (let [tx        (current-tx report)
+        _         (validate-installed-callable-write report db e a nv entity)
+        nv'       (coreprep/correct-value store a nv)
+        meta*     (meta entity)
+        new-datom (cond-> (datom e a nv' tx)
+                    meta* (with-meta meta*))]
+    (if (= (.-v old-datom) nv')
+      (if (some #(and (not (datom-added %)) (= % new-datom))
+                (:tx-data report))
+        (transact-report report new-datom)
+        (update report ::tx-redundant conjv new-datom))
+      (let [report' (transact-report report
+                                     (datom e a (.-v old-datom) tx false))]
+        (transact-report report' new-datom)))))
+
 (defn- retract-components [db datoms]
   (into #{} (comp
               (filter (fn [^Datom d] (txcommon/component? db (.-a d))))
@@ -348,15 +365,20 @@
                         (txcommon/entid-strict db nv)
                         nv)
         _             (vld/validate-val nv entity)
-        datoms        (concat
+        multival?     (txcommon/multival? db a)
+        datoms        (concatv
                         (.subSet ^TreeSortedSet (:eavt db)
                                  (datom e a nil tx0)
                                  (datom e a nil txmax))
                         (slice (:store db) :eav
                                (datom e a c/v0)
                                (datom e a c/vmax)))]
-    (vld/validate-cas-value (txcommon/multival? db a) e a ov nv datoms)
-    [(transact-add report [:db/add e a nv]) entities]))
+    (vld/validate-cas-value multival? e a ov nv datoms)
+    [(if multival?
+       (transact-add report [:db/add e a nv])
+       (transact-cas-cardinality-one
+         report db store entity e a nv (first datoms)))
+     entities]))
 
 (defn- handle-patch-idoc
   [report db store schema entity entities]
