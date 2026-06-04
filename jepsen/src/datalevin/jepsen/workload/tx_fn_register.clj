@@ -243,26 +243,41 @@
                                         (long (or (:payload-bytes row) 0)))))
                               values))}))))
 
-(defn- wait-for-txreg-visible-on-live-nodes!
+(defn- leader-txreg-snapshot
+  [node-state-fn cluster-id leader key-count payload-bytes]
+  (cond-> {}
+    leader
+    (assoc leader
+           (node-state-fn cluster-id leader key-count payload-bytes))))
+
+(defn- ready-txreg-snapshot?
+  [snapshot]
+  (boolean
+    (some (fn [[_ {:keys [ready?]}]]
+            ready?)
+          snapshot)))
+
+(defn- wait-for-txreg-visible-on-leader!
   [cluster-id key-count payload-bytes]
   (let [timeout-ms (local/workload-setup-timeout-ms cluster-id
                                                     default-setup-timeout-ms)
         deadline (+ (System/currentTimeMillis) timeout-ms)]
     (loop [last-snapshot nil]
-      (let [live-nodes (-> (local/cluster-state cluster-id) :live-nodes sort)
-            snapshot   (into {}
-                             (map (fn [logical-node]
-                                    [logical-node
-                                     (local-node-txreg-state
-                                       cluster-id
-                                       logical-node
-                                       key-count
-                                       payload-bytes)]))
-                             live-nodes)]
+      (let [leader    (try
+                        (:leader (local/wait-for-single-leader!
+                                   cluster-id
+                                   (max 1 (- deadline
+                                             (System/currentTimeMillis)))))
+                        (catch Throwable _
+                          nil))
+            snapshot  (leader-txreg-snapshot
+                        local-node-txreg-state
+                        cluster-id
+                        leader
+                        key-count
+                        payload-bytes)]
         (cond
-          (every? (fn [[_ {:keys [ready?]}]]
-                    ready?)
-                  snapshot)
+          (ready-txreg-snapshot? snapshot)
           snapshot
 
           (< (System/currentTimeMillis) deadline)
@@ -292,7 +307,7 @@
             (fn [conn]
               (ensure-tx-fns! conn)
               (ensure-registers! conn key-count payload-bytes)))
-          (wait-for-txreg-visible-on-live-nodes!
+          (wait-for-txreg-visible-on-leader!
             cluster-id
             key-count
             payload-bytes)

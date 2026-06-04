@@ -5,6 +5,7 @@
    [clojure.test :refer [deftest is]]
    [datalevin.core :as d]
    [datalevin.jepsen.local :as local]
+   [datalevin.jepsen.local.ops :as lops]
    [datalevin.kv :as kv]
    [datalevin.server :as srv]
    [datalevin.util :as u])
@@ -62,6 +63,39 @@
          :reason :timeout
          :timeout-ms timeout-ms
          :output (process-output process)}))))
+
+(deftest node-kv-open-opts-includes-node-ha-opts-test
+  (let [cluster {:base-opts
+                 {:wal? true
+                  :db-identity "db-test"
+                  :ha-mode :consensus-lease
+                  :ha-members [{:node-id 1
+                                :endpoint "127.0.0.1:19001"}]
+                  :ha-control-plane
+                  {:backend :sofa-jraft
+                   :group-id "group"
+                   :voters [{:peer-id "127.0.0.1:19004"
+                             :ha-node-id 1
+                             :promotable? true}]
+                   :operation-timeout-ms 30000}}
+                 :node-ha-opt-overrides
+                 {:n1 {:wal-segment-max-ms 17
+                       :ha-control-plane
+                       {:operation-timeout-ms 12345}}}}
+        node    {:logical-node :n1
+                 :node-id 1
+                 :peer-id "127.0.0.1:19004"
+                 :endpoint "127.0.0.1:19001"}
+        opts    (#'lops/node-kv-open-opts cluster :n1 node)]
+    (is (= true (:wal? opts)))
+    (is (= 1 (:ha-node-id opts)))
+    (is (= "127.0.0.1:19004"
+           (get-in opts [:ha-control-plane :local-peer-id])))
+    (is (= 17 (:wal-segment-max-ms opts)))
+    (is (= 12345
+           (get-in opts [:ha-control-plane :operation-timeout-ms])))
+    (is (= {:pool-size 1 :time-out 10000}
+           (:client-opts opts)))))
 
 (defn- start-clojure-child!
   [form]

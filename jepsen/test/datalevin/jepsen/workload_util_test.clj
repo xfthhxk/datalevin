@@ -328,3 +328,20 @@
         (is (true? (:payload-valid? result)))
         (is (= 128 (:payload-bytes result)))
         (is (= 1 (count @txs)))))))
+
+(deftest tx-fn-register-leader-snapshot-checks-only-leader-test
+  (let [checked-nodes (atom [])]
+    (is (= {:n1 {:ready? true}}
+           (#'tx-fn-register/leader-txreg-snapshot
+            (fn [_cluster-id logical-node _key-count _payload-bytes]
+              (swap! checked-nodes conj logical-node)
+              {:ready? true})
+            :cluster
+            :n1
+            4
+            128)))
+    (is (= [:n1] @checked-nodes))
+    (is (true? (#'tx-fn-register/ready-txreg-snapshot?
+                {:n1 {:ready? true}})))
+    (is (false? (#'tx-fn-register/ready-txreg-snapshot?
+                 {:n1 {:ready? false}})))))

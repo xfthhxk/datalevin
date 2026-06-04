@@ -806,12 +806,23 @@
        sort
        vec))
 
+(defn- node-kv-open-opts
+  [{:keys [base-opts node-ha-opt-overrides]} logical-node node]
+  (cond-> {:client-opts conn-client-opts}
+    (and (map? base-opts) node)
+    (merge (lcluster/node-ha-opts
+             base-opts
+             node
+             (get node-ha-opt-overrides logical-node)))))
+
 (defn with-node-kv-store
   [{:keys [clusters]} cluster-id logical-node f]
-  (let [{:keys [db-name node-by-name]} (get @clusters cluster-id)
-        endpoint (get-in node-by-name [logical-node :endpoint])
+  (let [{:keys [db-name node-by-name] :as cluster} (get @clusters cluster-id)
+        node      (get node-by-name logical-node)
+        endpoint  (:endpoint node)
+        open-opts (node-kv-open-opts cluster logical-node node)
         kv-store (r/open-kv (lcluster/db-uri endpoint db-name)
-                            {:client-opts conn-client-opts})]
+                            open-opts)]
     (try
       (f kv-store)
       (finally
