@@ -513,13 +513,18 @@
     #(let [state-lsn (long (or (:ha-local-last-applied-lsn m) 0))]
        (try
          (if-let [kv-store (local-kv-store m)]
-           (let [materialized-lsn
-                 (ha-local-materialized-data-lsn
-                  (:ha-role m)
-                  (read-ha-local-watermark-lsn* kv-store)
-                  (read-ha-local-snapshot-current-lsn kv-store)
-                  (read-ha-local-payload-lsn kv-store))]
-             (long-max2 state-lsn materialized-lsn))
+           (let [payload-lsn (read-ha-local-payload-lsn kv-store)
+                 materialized-lsn
+                 ;; For non-leaders, promotion must not treat volatile state or
+                 ;; txlog watermarks as proof that payload data is materialized.
+                 (if (= :leader (:ha-role m))
+                   (ha-local-materialized-data-lsn
+                    (:ha-role m)
+                    (read-ha-local-watermark-lsn* kv-store)
+                    (read-ha-local-snapshot-current-lsn kv-store)
+                    payload-lsn)
+                   payload-lsn)]
+             materialized-lsn)
            (if (and (bootstrap-empty-lease? observed-lease)
                     (zero? state-lsn))
              (long-max2 state-lsn (read-ha-local-watermark-lsn m))
