@@ -10,7 +10,8 @@
    [jepsen.client :as client]
    [jepsen.generator :as gen]
    [jepsen.independent :as independent]
-   [knossos.model :as model]))
+   [knossos.model :as model]
+   [taoensso.timbre :as log]))
 
 (def schema
   {:txreg/key     {:db/valueType :db.type/long
@@ -126,6 +127,11 @@
    {:db/ident :txreg/cas
     :db/fn    txreg-cas}])
 
+(defn- tx-fn-value?
+  [fun]
+  (or (fn? fun)
+      (i/inter-fn? fun)))
+
 (defn- write-op
   [_ _]
   {:type :invoke
@@ -190,6 +196,16 @@
     (when (seq missing)
       (d/transact! conn missing))))
 
+(defn- tx-report-lsn
+  [report]
+  (when-let [txs (seq (keep :tx (:tx-data report)))]
+    (reduce max (map long txs))))
+
+(defn- max-report-lsn
+  [& reports]
+  (when-let [lsns (seq (keep tx-report-lsn reports))]
+    (reduce max lsns)))
+
 (defn- local-node-txreg-state
   [cluster-id logical-node key-count payload-bytes]
   (let [rows       (local/local-query cluster-id
@@ -226,14 +242,15 @@
                                 rows)
             values       (mapv values-by-key (range (long key-count)))
             tx-fns       (into {}
-                             (map (fn [[ident fun]]
-                                    [ident (fn? fun)]))
-                             tx-fn-rows)]
+                                (map (fn [[ident fun]]
+                                       [ident (tx-fn-value? fun)]))
+                                tx-fn-rows)
+            tx-fns-ready? (and (= (count tx-fn-entities) (count tx-fns))
+                               (every? true? (vals tx-fns)))]
         {:values values
-         :tx-fns-visible? (every? true? (vals tx-fns))
+         :tx-fns-visible? tx-fns-ready?
          :node-diagnostics (local/node-diagnostics cluster-id logical-node)
-         :ready? (and (= (count tx-fn-entities) (count tx-fns))
-                      (every? true? (vals tx-fns))
+         :ready? (and tx-fns-ready?
                       (= (long key-count) (count values))
                       (every? (fn [{:keys [version payload-valid?]
                                      :as   row}]
@@ -258,40 +275,64 @@
           snapshot)))
 
 (defn- wait-for-txreg-visible-on-leader!
-  [cluster-id key-count payload-bytes]
-  (let [timeout-ms (local/workload-setup-timeout-ms cluster-id
-                                                    default-setup-timeout-ms)
-        deadline (+ (System/currentTimeMillis) timeout-ms)]
-    (loop [last-snapshot nil]
-      (let [leader    (try
-                        (:leader (local/wait-for-single-leader!
-                                   cluster-id
-                                   (max 1 (- deadline
-                                             (System/currentTimeMillis)))))
-                        (catch Throwable _
-                          nil))
-            snapshot  (leader-txreg-snapshot
-                        local-node-txreg-state
-                        cluster-id
-                        leader
-                        key-count
-                        payload-bytes)]
-        (cond
-          (ready-txreg-snapshot? snapshot)
-          snapshot
+  ([cluster-id key-count payload-bytes]
+   (wait-for-txreg-visible-on-leader!
+    cluster-id
+    key-count
+    payload-bytes
+    (local/workload-setup-timeout-ms cluster-id default-setup-timeout-ms)
+    nil))
+  ([cluster-id key-count payload-bytes timeout-ms setup-lsn]
+   (let [timeout-ms (long timeout-ms)
+         deadline   (+ (System/currentTimeMillis) timeout-ms)]
+     (loop [last-snapshot nil]
+       (let [leader    (try
+                         (:leader (local/wait-for-single-leader!
+                                    cluster-id
+                                    (max 1 (- deadline
+                                              (System/currentTimeMillis)))))
+                         (catch Throwable _
+                           nil))
+             snapshot  (leader-txreg-snapshot
+                         local-node-txreg-state
+                         cluster-id
+                         leader
+                         key-count
+                         payload-bytes)]
+         (cond
+           (ready-txreg-snapshot? snapshot)
+           snapshot
 
-          (< (System/currentTimeMillis) deadline)
-          (do
-            (Thread/sleep 250)
-            (recur snapshot))
+           (< (System/currentTimeMillis) deadline)
+           (do
+             (Thread/sleep 250)
+             (recur snapshot))
 
-          :else
-          (throw (ex-info "Timed out waiting for tx-fn register state"
-                          {:cluster-id cluster-id
-                           :timeout-ms timeout-ms
-                           :payload-bytes payload-bytes
-                           :snapshot snapshot
-                           :previous-snapshot last-snapshot})))))))
+           :else
+           (let [data {:cluster-id cluster-id
+                       :timeout-ms timeout-ms
+                       :setup-lsn setup-lsn
+                       :leader leader
+                       :payload-bytes payload-bytes
+                       :snapshot snapshot
+                       :previous-snapshot last-snapshot}]
+             (log/warn "Timed out waiting for tx-fn register state"
+                       data)
+             (throw (ex-info "Timed out waiting for tx-fn register state"
+                             data)))))))))
+
+(defn- wait-for-setup-lsn-visible-on-leader!
+  [cluster-id setup-lsn timeout-ms]
+  (when (some? setup-lsn)
+    (let [leader (:leader (local/wait-for-single-leader!
+                           cluster-id
+                           timeout-ms))]
+      (local/wait-for-nodes-at-least-lsn!
+       cluster-id
+       [leader]
+       setup-lsn
+       timeout-ms)
+      leader)))
 
 (defn- ensure-txreg-initialized!
   [test key-count payload-bytes]
@@ -299,18 +340,30 @@
     (when-not (contains? @initialized-clusters cluster-id)
       (locking initialized-clusters
         (when-not (contains? @initialized-clusters cluster-id)
-          (workload.util/with-retrying-leader-conn
-            test
-            schema
-            (local/workload-setup-timeout-ms cluster-id
-                                             default-setup-timeout-ms)
-            (fn [conn]
-              (ensure-tx-fns! conn)
-              (ensure-registers! conn key-count payload-bytes)))
-          (wait-for-txreg-visible-on-leader!
-            cluster-id
-            key-count
-            payload-bytes)
+          (let [timeout-ms (local/workload-setup-timeout-ms
+                            cluster-id
+                            default-setup-timeout-ms)
+                setup-lsn  (workload.util/with-retrying-leader-conn
+                             test
+                             schema
+                             timeout-ms
+                             (fn [conn]
+                               (let [tx-fn-report (ensure-tx-fns! conn)
+                                     reg-report   (ensure-registers!
+                                                   conn
+                                                   key-count
+                                                   payload-bytes)]
+                                 (max-report-lsn tx-fn-report reg-report))))]
+            (wait-for-setup-lsn-visible-on-leader!
+             cluster-id
+             setup-lsn
+             timeout-ms)
+            (wait-for-txreg-visible-on-leader!
+             cluster-id
+             key-count
+             payload-bytes
+             timeout-ms
+             setup-lsn))
           (swap! initialized-clusters conj cluster-id))))))
 
 (defn- keyed-value
@@ -450,7 +503,7 @@
     (ensure-txreg-initialized! test key-count payload-bytes)
     this)
 
-  (invoke! [this test op]
+  (invoke! [_this test op]
     (try
       (ensure-txreg-initialized! test key-count payload-bytes)
       (local/with-leader-conn
