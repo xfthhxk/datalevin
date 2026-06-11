@@ -91,6 +91,9 @@
     {:cache-entry (txlog-records-cache-entry
                    segment-id path file-bytes modified-ms records)
      :partial-tail? (boolean (:partial-tail? scan))
+     :preallocated-tail? (boolean (:preallocated-tail? scan))
+     :valid-end (:valid-end scan)
+     :size (:size scan)
      :last-lsn (some-> records peek :lsn long)}))
 
 (def ^:const no-floor-lsn

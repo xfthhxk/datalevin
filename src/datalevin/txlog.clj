@@ -230,6 +230,40 @@
 (def ^:private scan-segment-records-cache-entry
   trec/scan-segment-records-cache-entry)
 
+(defn- repair-closed-segment-preallocated-tail!
+  [^long segment-id ^File file cause]
+  (let [path (.getPath file)
+        repaired
+        (try
+          (scan-segment-records-cache-entry segment-id file true)
+          (catch Exception e
+            (if cause
+              (throw cause)
+              (throw e))))]
+    (if (:preallocated-tail? repaired)
+      (do
+        (truncate-partial-tail!
+         path
+         {:allow-preallocated-tail? true
+          :collect-records?         false})
+        (scan-segment-records-cache-entry segment-id file false))
+      (if cause
+        (throw cause)
+        (raise "Partial tail found on closed txn-log segment"
+               {:type :txlog/corrupt
+                :path path})))))
+
+(defn- scan-closed-segment-records-cache-entry!
+  [^long segment-id ^File file]
+  (try
+    (let [{:keys [partial-tail?] :as result}
+          (scan-segment-records-cache-entry segment-id file false)]
+      (if partial-tail?
+        (repair-closed-segment-preallocated-tail! segment-id file nil)
+        result))
+    (catch Exception e
+      (repair-closed-segment-preallocated-tail! segment-id file e))))
+
 (defn init-runtime-state
   [info marker-state]
   (validate-runtime-config! info)
@@ -241,12 +275,8 @@
         (reduce
          (fn [[cache ^long closed-last-lsn] {:keys [id file]}]
            (let [segment-id (long id)
-                 {:keys [cache-entry partial-tail? last-lsn]}
-                 (scan-segment-records-cache-entry segment-id file false)]
-             (when partial-tail?
-               (raise "Partial tail found on closed txn-log segment"
-                      {:type :txlog/corrupt
-                       :path (.getPath ^File file)}))
+                 {:keys [cache-entry last-lsn]}
+                 (scan-closed-segment-records-cache-entry! segment-id file)]
              [(assoc cache segment-id cache-entry)
               (long (or last-lsn closed-last-lsn))]))
          [{} 0]

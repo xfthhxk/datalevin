@@ -1004,6 +1004,48 @@
       (finally
         (u/delete-files dir)))))
 
+(deftest test-wal-open-repairs-closed-preallocated-segment-tail
+  (let [dir       (u/tmp-dir (str "wal-closed-prealloc-tail-test-"
+                                  (UUID/randomUUID)))
+        txlog-dir (str dir u/+separator+ "txlog")
+        state     (atom nil)]
+    (try
+      (u/create-dirs txlog-dir)
+      (let [closed-path (txlog/segment-path txlog-dir 1)
+            active-path (txlog/segment-path txlog-dir 2)]
+        (txlog/prepare-segment! closed-path 4096)
+        (with-open [^java.nio.channels.FileChannel ch
+                    (txlog/open-segment-channel closed-path)]
+          (txlog/append-record-at!
+           ch
+           0
+           (txlog/encode-commit-row-payload 1 1 [])))
+        (with-open [^java.nio.channels.FileChannel _
+                    (txlog/open-segment-channel active-path)])
+        (is (:preallocated-tail?
+             (txlog/scan-segment closed-path
+                                 {:allow-preallocated-tail? true
+                                  :collect-records?         false})))
+        (is (thrown-with-msg?
+             Exception
+             #"Txn-log segment corruption"
+             (txlog/scan-segment closed-path {:collect-records? false})))
+        (reset! state
+                (:state (txlog/init-runtime-state {:dir dir} {})))
+        (is (= 2 (long @(:segment-id @state))))
+        (is (= 2 (long @(:next-lsn @state))))
+        (let [file (java.io.File. ^String closed-path)
+              scan (txlog/scan-segment closed-path
+                                       {:collect-records? false})]
+          (is (false? (:partial-tail? scan)))
+          (is (= (long (:valid-end scan))
+                 (long (.length file))))))
+      (finally
+        (when-let [state @state]
+          (when-let [ch @(:segment-channel state)]
+            (.close ^java.io.Closeable ch)))
+        (u/delete-files dir)))))
+
 (deftest test-wal-commit-meta-segment-offset-matches-segment-end
   (let [dir       (u/tmp-dir (str "wal-commit-meta-offset-test-"
                                   (UUID/randomUUID)))

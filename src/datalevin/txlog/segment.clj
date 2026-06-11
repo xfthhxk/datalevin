@@ -305,10 +305,17 @@
              :partial-tail? false}
 
             (< remaining codec/record-header-size)
-            {:records       records
-             :valid-end     offset
-             :size          size
-             :partial-tail? true}
+            (if (and allow-preallocated-tail?
+                     (tail-all-zero? ch offset size read-bf))
+              {:records            records
+               :valid-end          offset
+               :size               size
+               :partial-tail?      true
+               :preallocated-tail? true}
+              {:records       records
+               :valid-end     offset
+               :size          size
+               :partial-tail? true})
 
             :else
             (let [_         (doto read-bf
