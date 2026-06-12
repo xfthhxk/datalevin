@@ -991,7 +991,15 @@
      (cond-> (new-db store)
        (some? runtime-opts) (with-runtime-opts runtime-opts)))))
 
-(defn fill-db [db datoms] (quick-fill (.-store ^DB db) datoms) db)
+(defn fill-db
+  [db datoms]
+  (let [store (.-store ^DB db)]
+    (quick-fill store datoms)
+    (let [target (last-modified store)]
+      (when (instance? Store store)
+        (s/mark-state-current! ^Store store target))
+      (refresh-cache store target))
+    (carry-runtime-opts (new-db store) db)))
 
 ;; ----------------------------------------------------------------------------
 

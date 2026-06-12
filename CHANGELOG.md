@@ -1,12 +1,23 @@
 # Change Log
 
+## WIP
+### Fixed
+- [KV] Live-created DBIs are now WAL-recorded and replayable
+  [#369](https://github.com/datalevin/datalevin/issues/369).
+- [Datalog] `dump` handle `:json/null` correctly
+  [#370](https://github.com/datalevin/datalevin/issues/370).
+- [Datalog] `fill-db` refreshes read caches after bulk load, and the query
+  optimizer verifies zero cardinality estimates before pruning
+  [#371](https://github.com/datalevin/datalevin/issues/371).
+
+
 ## 0.10.18 (2026-05-27)
 ### Fixed
 - [Vector] Missing embedding Java classes.
 
 ## 0.10.17 (2026-05-27)
 ### Improved
-- [Lib] Added add-opens JVM options to JS and python libraries.
+- [Lib] Added add-opens JVM options to JS and Python libraries.
 - update deps.
 
 ## 0.10.16 (2026-05-27)

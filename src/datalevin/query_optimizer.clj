@@ -14,8 +14,9 @@
    [clojure.core.reducers :as rd]
    [clojure.walk :as w]
    [datalevin.constants :as c]
+   [datalevin.datom :as dd]
    [datalevin.db :as db]
-   [datalevin.interface :refer [av-size]]
+   [datalevin.interface :refer [av-size populated?]]
    [datalevin.lmdb :as l]
    [datalevin.parser :as dp]
    [datalevin.query.optimizer.graph :as qog]
@@ -372,30 +373,81 @@
             (if (< s cap) s (reduced cap))))
         0 ranges))))
 
+(def ^:private verified-non-empty-size
+  (inc (long c/init-exec-size-threshold)))
+
+(defn- zero-count-clause-size
+  "Fast clause counts come from the counted-index metadata, which has been
+  observed to report 0 for an attribute that still holds datoms (issue #371).
+  A zero count is a correctness decision, not an estimate -- it short-circuits
+  the whole query to an empty result -- so it must be confirmed against the
+  actual index before being trusted. Returns 0 only when the clause is truly
+  empty; otherwise returns a conservative non-empty size that keeps planning on
+  the sampled path."
+  ^long [^DB db e {:keys [attr val range]}]
+  (let [store (.-store db)]
+    (if (and (some-> ((db/-schema db) attr) :db/aid)
+             (cond
+               (int? e)
+               (populated? store :eav (dd/datom e attr c/v0)
+                           (dd/datom e attr c/vmax))
+
+               (some? val)
+               (populated? store :ave (dd/datom c/e0 attr val)
+                           (dd/datom c/emax attr val))
+
+               range
+               (when-not (identical? range :empty-range)
+                 (some (fn [r]
+                         (let [[lv hv] (range->start-end r)]
+                           (populated? store :ave
+                                       (dd/datom c/e0 attr lv)
+                                       (dd/datom c/emax attr hv))))
+                       range))
+
+               :else
+               (populated? store :ave (dd/datom c/e0 attr nil)
+                           (dd/datom c/emax attr nil))))
+      verified-non-empty-size
+      0)))
+
+(defn ^:redef fast-clause-count
+  "Fast datom count for a clause, backed by the counted-index metadata.
+  May be inaccurate; a zero result must be verified by
+  `zero-count-clause-size` before it short-circuits planning (issue #371).
+  ^:redef so tests can simulate counted-index metadata drift."
+  ^long [^DB db e {:keys [attr val range]} ^long mcount]
+  (let [store (.-store db)]
+    (cond
+      (int? e)    (db/-count db [e attr nil] mcount)
+      (some? val) (av-size store attr val)
+      range       (range-count db attr range mcount)
+      :else       (db/-count db [nil attr nil] mcount))))
+
 (defn- count-node-datoms
   [^DB db {:keys [free bound] :as node}]
-  (let [store (.-store db)]
-    (reduce
-      (fn [{:keys [mcount] :as node} [k i {:keys [attr val range]}]]
-        (let [^long c (cond
-                        (some? val) (av-size store attr val)
-                        range       (range-count db attr range mcount)
-                        :else       (db/-count db [nil attr nil] mcount))]
-          (cond
-            (zero? c)          (reduced (assoc node :mcount 0))
-            (< c ^long mcount) (-> node
-                                   (assoc-in [k i :count] c)
-                                   (assoc :mcount c :mpath [k i]))
-            :else              (assoc-in node [k i :count] c))))
-      (assoc node :mcount Long/MAX_VALUE)
-      (let [flat (fn [k m] (map-indexed (fn [i clause] [k i clause]) m))]
-        (concat (flat :bound bound) (flat :free free))))))
+  (reduce
+    (fn [{:keys [mcount] :as node} [k i clause]]
+      (let [c (fast-clause-count db nil clause (long mcount))
+            c (if (zero? c) (zero-count-clause-size db nil clause) c)]
+        (cond
+          (zero? c)          (reduced (assoc node :mcount 0))
+          (< c ^long mcount) (-> node
+                                 (assoc-in [k i :count] c)
+                                 (assoc :mcount c :mpath [k i]))
+          :else              (assoc-in node [k i :count] c))))
+    (assoc node :mcount Long/MAX_VALUE)
+    (let [flat (fn [k m] (map-indexed (fn [i clause] [k i clause]) m))]
+      (concat (flat :bound bound) (flat :free free)))))
 
 (defn- count-known-e-datoms
   [db e {:keys [free] :as node}]
   (u/reduce-indexed
     (fn [{:keys [mcount] :as node} {:keys [attr]} i]
-      (let [^long c (db/-count db [e attr nil] mcount)]
+      (let [c (fast-clause-count db e {:attr attr} (long mcount))
+            c (if (zero? c)
+                (zero-count-clause-size db e {:attr attr})
+                c)]
         (cond
           (zero? c)          (reduced (assoc node :mcount 0))
           (< c ^long mcount) (-> node
