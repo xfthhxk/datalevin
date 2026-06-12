@@ -28,21 +28,62 @@
    [java.io PushbackReader FileOutputStream FileInputStream DataOutputStream
     DataInputStream IOException]))
 
+(defn- idoc-attr?
+  [schema attr]
+  (= :db.type/idoc (get-in schema [attr :db/valueType])))
+
+(defn- idoc-dump-value
+  [v]
+  (cond
+    (identical? v :json/null)
+    nil
+
+    (map? v)
+    (reduce-kv
+      (fn [m k v]
+        (assoc m k (idoc-dump-value v)))
+      {}
+      v)
+
+    (vector? v)
+    (mapv idoc-dump-value v)
+
+    :else
+    v))
+
+(defn- datom-dump-row
+  [schema ^Datom datom]
+  (let [attr (.-a datom)
+        v    (.-v datom)]
+    [(.-e datom) attr (if (idoc-attr? schema attr)
+                        (idoc-dump-value v)
+                        v)]))
+
+(defn- load-datom
+  [schema d]
+  (let [[_ attr value] d]
+    (apply dd/datom
+           (if (idoc-attr? schema attr)
+             (assoc (vec d) 2 (idoc-dump-value value))
+             d))))
+
 (defn dump-datalog
   ([conn]
    (binding [u/*datalevin-print* true]
-     (p/pprint (conn/opts conn))
-     (p/pprint (conn/schema conn))
-     (doseq [^Datom datom (db/-datoms @conn :eav nil nil nil)]
-       (prn [(.-e datom) (.-a datom) (.-v datom)]))))
+     (let [schema (conn/schema conn)]
+       (p/pprint (conn/opts conn))
+       (p/pprint schema)
+       (doseq [^Datom datom (db/-datoms @conn :eav nil nil nil)]
+         (prn (datom-dump-row schema datom))))))
   ([conn data-output]
    (if data-output
-     (nippy/freeze-to-out!
-       data-output
-       [(conn/opts conn)
-        (conn/schema conn)
-        (map (fn [^Datom datom] [(.-e datom) (.-a datom) (.-v datom)])
-             (db/-datoms @conn :eav nil nil nil))])
+     (let [schema (conn/schema conn)]
+       (nippy/freeze-to-out!
+         data-output
+         [(conn/opts conn)
+          schema
+          (map (fn [^Datom datom] (datom-dump-row schema datom))
+               (db/-datoms @conn :eav nil nil nil))]))
      (dump-datalog conn))))
 
 (def ^:private nippy-meta-protocol-key
@@ -84,7 +125,7 @@
              new-schema                   (merge old-schema schema)
              db                           (db/init-db
                                             (for [d datoms]
-                                              (apply dd/datom d))
+                                              (load-datom new-schema d))
                                             dir new-schema new-opts)]
          (db/close-db db))
        (catch Exception e
@@ -104,7 +145,7 @@
              new-schema            (merge old-schema schema)
              datoms                (->> (repeatedly read-form)
                                         (take-while #(not= ::EOF %))
-                                        (map #(apply dd/datom %)))
+                                        (map #(load-datom new-schema %)))
              db                    (db/init-db datoms dir new-schema new-opts)]
          (db/close-db db)))
      (catch IOException e
