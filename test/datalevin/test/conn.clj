@@ -17,7 +17,7 @@
   (:import
    [datalevin.db DB]
    [datalevin.storage Store]
-   [java.util Date UUID]))
+   [java.util Arrays Date UUID]))
 
 (use-fixtures :each db-fixture)
 
@@ -28,6 +28,35 @@
 (defn- conn-env-opts
   [conn]
   (i/env-opts (.-lmdb ^Store (conn-store conn))))
+
+(defn- txlog-ops
+  [db]
+  (mapcat :ops (kv/open-tx-log db 1)))
+
+(defn- txlog-dbi-registration-op
+  [ops op dbi-name]
+  (some (fn [row]
+          (when (and (= op (nth row 0 nil))
+                     (= c/kv-info (nth row 1 nil))
+                     (= [:dbis dbi-name] (nth row 2 nil)))
+            row))
+        ops))
+
+(defn- copy-snapshot-files-to-env!
+  [snapshot-path env-dir]
+  (doseq [^java.io.File f (or (u/list-files snapshot-path) [])
+          :when (.isFile f)
+          :when (not= "snapshot.edn" (.getName f))]
+    (u/copy-file (.getPath f)
+                 (str env-dir u/+separator+ (.getName f)))))
+
+(defn- first-wal-segment-path
+  [txlog-dir]
+  (->> (or (u/list-files txlog-dir) [])
+       (map #(.getPath ^java.io.File %))
+       (filter #(str/ends-with? % ".wal"))
+       sort
+       first))
 
 (defn- test-ha-opts
   []
@@ -112,6 +141,31 @@
       (is (= :relaxed (:durability-profile (d/txlog-watermarks db))))
       (finally
         (d/close-kv db)
+        (u/delete-files dir)))))
+
+(deftest test-kv-wal-logs-dbi-lifecycle
+  (let [dir  (u/tmp-dir (str "test-kv-wal-dbi-lifecycle-"
+                             (UUID/randomUUID)))
+        opts {:wal? true
+              :wal-durability-profile :strict
+              :snapshot-bootstrap-force? false}]
+    (try
+      (let [db (d/open-kv dir opts)]
+        (try
+          (d/open-dbi db "live" {:key-size 64})
+          (d/drop-dbi db "live")
+          (kv/force-txlog-sync! db)
+          (let [ops    (txlog-ops db)
+                put-op (txlog-dbi-registration-op ops :put "live")
+                del-op (txlog-dbi-registration-op ops :del "live")]
+            (is (some? put-op))
+            (is (= [:keyword :string] (nth put-op 4)))
+            (is (= :data (nth put-op 5)))
+            (is (some? del-op))
+            (is (= [:keyword :string] (nth del-op 3))))
+          (finally
+            (d/close-kv db))))
+      (finally
         (u/delete-files dir)))))
 
 (deftest test-datalog-ha-forces-safe-wal
@@ -264,6 +318,44 @@
     (is (:good/attr (d/schema conn)))
     (d/close conn)
     (u/delete-files dir)))
+
+(deftest test-live-idoc-schema-initializes-index-and-logs-dbis
+  (let [dir  (u/tmp-dir (str "test-live-idoc-schema-"
+                             (UUID/randomUUID)))
+        opts {:wal? true
+              :wal-durability-profile :strict
+              :snapshot-bootstrap-force? false}
+        conn (d/create-conn dir nil opts)]
+    (try
+      (d/update-schema conn
+                       {:doc/idoc {:db/valueType :db.type/idoc
+                                   :db/domain "profiles"}})
+      (d/transact! conn [{:db/id 1
+                          :doc/idoc {:status "active"}}])
+      (is (= {:status "active"}
+             (:doc/idoc (d/entity @conn 1))))
+      (let [lmdb (.-lmdb ^Store (conn-store conn))
+            ops  (txlog-ops lmdb)]
+        (is (some? (txlog-dbi-registration-op ops
+                                              :put
+                                              "profiles/doc-ref")))
+        (is (some? (txlog-dbi-registration-op ops
+                                              :put
+                                              "profiles/doc-index")))
+        (is (some? (txlog-dbi-registration-op ops
+                                              :put
+                                              "profiles/path-dict"))))
+      (d/close conn)
+      (let [conn2 (d/create-conn dir nil opts)]
+        (try
+          (is (= {:status "active"}
+                 (:doc/idoc (d/entity @conn2 1))))
+          (finally
+            (d/close conn2))))
+      (finally
+        (when-not (d/closed? conn)
+          (d/close conn))
+        (u/delete-files dir)))))
 
 (deftest test-ways-to-create-conn-1
   (let [dir  (u/tmp-dir (str "test-" (UUID/randomUUID)))
@@ -728,10 +820,11 @@
         (try
           (d/open-dbi db "a")
           (is (nil? (d/get-value db "a" :k)))
-          (is (= []
+          (is (= [1]
                  (mapv :lsn (kv/open-tx-log db 1))))
-          (is (nil? (get-in (kv/read-commit-marker db) [:current :applied-lsn])))
-          (is (= 0
+          (is (= 1
+                 (get-in (kv/read-commit-marker db) [:current :applied-lsn])))
+          (is (= 1
                  (:last-applied-lsn (kv/txlog-watermarks db))))
           (is (:ok? (kv/verify-commit-marker! db)))
           (finally
@@ -763,13 +856,13 @@
                                                {:type ::forced-commit-failure}))))]
                    (i/close-transact-kv db)))))
           (is (nil? (d/get-value db "a" :k)))
-          (is (= []
+          (is (= [1]
                  (mapv :lsn (kv/open-tx-log db 1))))
           (is (= :transacted
                  (d/transact-kv db [[:put "a" :k2 :v2]])))
           (is (= :v2
                  (d/get-value db "a" :k2)))
-          (is (= [1]
+          (is (= [1 2]
                  (mapv :lsn (kv/open-tx-log db 1))))
           (finally
             (d/close-kv db))))
@@ -798,8 +891,8 @@
             (is (= :transacted
                    (d/transact-kv db [[:put "a" :k :v]]))))
           (is (= :v (:value @seen)))
-          (is (= 1 (long (:txlog-lsn @seen))))
-          (is (= 1
+          (is (= 2 (long (:txlog-lsn @seen))))
+          (is (= 2
                  (long (get-in @seen [:watermarks :last-applied-lsn]))))
           (finally
             (d/close-kv db))))
@@ -831,8 +924,8 @@
               (is (= :committed
                      (i/close-transact-kv db)))))
           (is (= :v (:value @seen)))
-          (is (= 1 (long (:txlog-lsn @seen))))
-          (is (= 1
+          (is (= 2 (long (:txlog-lsn @seen))))
+          (is (= 2
                  (long (get-in @seen [:watermarks :last-applied-lsn]))))
           (finally
             (d/close-kv db))))
@@ -860,14 +953,14 @@
                  (d/transact-kv db [[:put "a" :k :v]]))))
           (is (= :v
                  (d/get-value db "a" :k)))
-          (is (= 1
+          (is (= 2
                  (long (:last-applied-lsn (kv/txlog-watermarks db)))))
           (is (= :transacted
                  (d/transact-kv db [[:put "a" :k2 :v2]])))
           (is (= [:v :v2]
                  [(d/get-value db "a" :k)
                   (d/get-value db "a" :k2)]))
-          (is (= [1 2]
+          (is (= [1 2 3]
                  (mapv :lsn (kv/open-tx-log db 1))))
           (finally
             (d/close-kv db))))
@@ -949,6 +1042,90 @@
                  (d/get-value db "a" :k3)))
           (finally
             (d/close-kv db))))
+      (finally
+        (u/delete-files dir)))))
+
+(deftest test-wal-replay-restores-live-created-dbi-from-snapshot-tail
+  (let [dir  (u/tmp-dir (str "wal-live-dbi-snapshot-tail-test-"
+                             (UUID/randomUUID)))
+        txlog-dir (str dir u/+separator+ "txlog")
+        opts {:wal? true
+              :wal-durability-profile :strict
+              :snapshot-bootstrap-force? false}]
+    (try
+      (let [snapshot (atom nil)]
+        (let [db (d/open-kv dir opts)]
+          (try
+            (reset! snapshot (:snapshot (d/create-snapshot! db)))
+            (d/open-dbi db "live" {:key-size 64})
+            (is (= :transacted
+                   (d/transact-kv db [[:put "live" :k :v]])))
+            (finally
+              (d/close-kv db))))
+        (copy-snapshot-files-to-env! (:path @snapshot) dir)
+        (let [applied-lsn (long (:applied-lsn @snapshot))]
+          (txlog/write-meta-file!
+           (txlog/meta-path txlog-dir)
+           {:last-committed-lsn applied-lsn
+            :last-durable-lsn applied-lsn
+            :last-applied-lsn applied-lsn
+            :segment-id 1
+            :segment-offset 0
+            :updated-ms (System/currentTimeMillis)}))
+        (let [db (d/open-kv dir opts)]
+          (try
+            (is (map? (i/dbi-opts db "live")))
+            (is (= :v
+                   (d/get-value db "live" :k)))
+            (finally
+              (d/close-kv db)))))
+      (finally
+        (u/delete-files dir)))))
+
+(deftest test-wal-snapshot-fallback-failure-keeps-original-lmdb-files
+  (let [dir       (u/tmp-dir (str "wal-snapshot-fallback-safe-test-"
+                                  (UUID/randomUUID)))
+        txlog-dir (str dir u/+separator+ "txlog")
+        data-path (str dir u/+separator+ c/data-file-name)
+        opts      {:wal? true
+                   :snapshot-bootstrap-force? false}]
+    (try
+      (let [snapshot-path (atom nil)]
+        (let [db (d/open-kv dir opts)]
+          (try
+            (d/open-dbi db "a")
+            (is (= :transacted
+                   (d/transact-kv db [[:put "a" :k1 :v1]])))
+            (d/create-snapshot! db)
+            (reset! snapshot-path (:path (first (d/list-snapshots db))))
+            (is (= :transacted
+                   (d/transact-kv db [[:put "a" :k2 :v2]])))
+            (finally
+              (d/close-kv db))))
+        (let [before (java.nio.file.Files/readAllBytes
+                      (.toPath (java.io.File. data-path)))
+              snapshot-data-path (str @snapshot-path u/+separator+
+                                      c/data-file-name)
+              segment-path (first-wal-segment-path txlog-dir)]
+          (is (string? segment-path))
+          (with-open [raf (java.io.RandomAccessFile.
+                           ^String snapshot-data-path
+                           "rw")]
+            (.setLength raf 0)
+            (.write raf (.getBytes "not-an-lmdb-snapshot" "UTF-8")))
+          (with-open [raf (java.io.RandomAccessFile.
+                           ^String segment-path
+                           "rw")]
+            (.seek raf 0)
+            (.write raf (byte-array [0 0 0 0])))
+          (is (thrown-with-msg?
+               Exception
+               #"Txn-log recovery failed after snapshot restore attempts"
+               (d/open-kv dir opts)))
+          (is (Arrays/equals
+               before
+               (java.nio.file.Files/readAllBytes
+                (.toPath (java.io.File. data-path)))))))
       (finally
         (u/delete-files dir)))))
 
@@ -1079,30 +1256,30 @@
       (let [db (d/open-kv dir opts)]
         (try
           (d/open-dbi db "a")
-          ;; Build a local WAL tail that ends at LSN 13, then simulate a
+          ;; Build a local WAL tail that ends at LSN 14, then simulate a
           ;; snapshot-installed follower whose persisted payload floor has
-          ;; already advanced to LSN 14 before the runtime txlog cursor is
+          ;; already advanced to LSN 15 before the runtime txlog cursor is
           ;; realigned.
           (dotimes [i 13]
             (is (= :transacted
                    (d/transact-kv db [[:put "a" i i]]))))
           (let [state (txlog/state db)]
             (is (some? state))
-            (is (= 14 (long @(:next-lsn state))))
+            (is (= 15 (long @(:next-lsn state))))
             (is (= :transacted
                    (i/transact-kv db
                                   c/kv-info
-                                  [[:put c/wal-local-payload-lsn 14]]
+                                  [[:put c/wal-local-payload-lsn 15]]
                                   :keyword
                                   :data)))
             (let [res (kv/mirror-replayed-txlog-record!
                        db
-                       {:lsn 15
+                       {:lsn 16
                         :ha-term 7
                         :rows [[:put "a" :replayed :ok]]})]
-              (is (= 15 (long (:lsn res))))
+              (is (= 16 (long (:lsn res))))
               (is (not (:skipped? res)))
-              (is (= 16 (long @(:next-lsn state))))
+              (is (= 17 (long @(:next-lsn state))))
               (is (= :ok
                      (d/get-value db "a" :replayed)))))
           (finally

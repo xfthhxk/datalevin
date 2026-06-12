@@ -23,7 +23,7 @@
    [datalevin.interface
     :refer [close-kv list-dbis entries get-range open-dbi transact-kv clear-dbi
             env-dir copy open-transact-kv close-transact-kv abort-transact-kv
-            stat]])
+            stat env-opts]])
   (:import
    [datalevin.async IAsyncWork]
    [datalevin.cpp Util]
@@ -230,8 +230,15 @@
   (vreset! open-kv-wrapper (or f identity))
   nil)
 
+(defn- ensure-wal-open-kv-wrapper!
+  [db]
+  (when (and (identical? @open-kv-wrapper identity)
+             (true? (:wal? (env-opts db))))
+    (require 'datalevin.kv)))
+
 (defn wrap-open-kv
   [db]
+  (ensure-wal-open-kv-wrapper! db)
   (@open-kv-wrapper db))
 
 (defn- nippy-dbi [lmdb dbi]

@@ -512,13 +512,24 @@
          commit-datoms-kv-plan!
          ensure-embedding-vector!
          migrate-attr-values transact-opts ->SamplingWork e-sample*
-         default-ratio* analyze*)
+         default-ratio* analyze*
+         init-idoc-domains init-idoc-indices store-idoc-indices)
+
+(defn- merge-missing-idoc-indices
+  [lmdb idoc-indices schema]
+  (let [missing (into {}
+                      (remove (fn [[domain _]]
+                                (contains? idoc-indices domain)))
+                      (init-idoc-domains schema))]
+    (if (seq missing)
+      (merge idoc-indices (init-idoc-indices lmdb missing))
+      idoc-indices)))
 
 (deftype Store [lmdb
                 search-engines
                 vector-indices
                 embedding-indices
-                idoc-indices
+                ^:volatile-mutable idoc-indices
                 embedding-providers
                 ^ConcurrentHashMap counts   ; aid -> touched times
                 ^:volatile-mutable opts
@@ -554,6 +565,8 @@
             (set! rschema (schema->rschema schema*))
             (set! attrs (init-attrs schema*))
             (set! max-aid (init-max-aid schema*))
+            (set! idoc-indices
+                  (merge-missing-idoc-indices lmdb idoc-indices schema*))
             (mark-state-current! this last-modified-ms)))))
     this)
 
@@ -642,6 +655,8 @@
       (set! rschema (schema->rschema schema))
       (set! attrs (init-attrs schema))
       (set! max-aid (init-max-aid schema))
+      (set! idoc-indices
+            (merge-missing-idoc-indices lmdb idoc-indices schema))
       (mark-state-current! this (init-state-sync-ms lmdb)))
     schema)
 
@@ -2103,7 +2118,7 @@
                        (.-search-engines store)
                        (.-vector-indices store)
                        (.-embedding-indices store)
-                       (.-idoc-indices store)
+                       (store-idoc-indices store)
                        plan)]
              [res (:secondary-index-job-count plan)]))]
      (when (pos? (long (or secondary-index-job-count 0)))
@@ -3207,6 +3222,15 @@
   [indices lmdb]
   (zipmap (keys indices) (map #(idoc/transfer % lmdb) (vals indices))))
 
+(def ^:private store-idoc-indices-field
+  (delay
+    (doto (.getDeclaredField Store "idoc_indices")
+      (.setAccessible true))))
+
+(defn ^:no-doc store-idoc-indices
+  [store]
+  (.get ^java.lang.reflect.Field @store-idoc-indices-field store))
+
 (defn transfer
   "transfer state of an existing store to a new store that has a different
   LMDB instance"
@@ -3216,7 +3240,7 @@
              (transfer-engines (.-search-engines old) lmdb)
              (transfer-indices (.-vector-indices old) lmdb)
              (transfer-indices (.-embedding-indices old) lmdb)
-             (transfer-idoc-indices (.-idoc-indices old) lmdb)
+             (transfer-idoc-indices (store-idoc-indices old) lmdb)
              (.-embedding-providers old)
              (.-counts old)
              (opts old)
@@ -3245,7 +3269,7 @@
              (.-search-engines old)
              (.-vector-indices old)
              (.-embedding-indices old)
-             (.-idoc-indices old)
+             (store-idoc-indices old)
              (.-embedding-providers old)
              (.-counts old)
              (store-visible-opts new-opts)

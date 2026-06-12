@@ -47,6 +47,8 @@
          txlog-clear-replica-floor-state!
          txlog-pin-backup-floor-state!
          txlog-unpin-backup-floor-state!
+         reset-txlog-runtime-for-snapshot!
+         txlog-mark-recovery-source!
          persisted-payload-floor-lsn
          persisted-runtime-floor-lsn
          ->KVLMDB)
@@ -409,6 +411,15 @@
    (.toPath (io/file dst))
    (into-array java.nio.file.CopyOption
                [java.nio.file.StandardCopyOption/REPLACE_EXISTING])))
+
+(defn- copy-dir-contents!
+  [src-dir dest-dir]
+  (u/create-dirs dest-dir)
+  (doseq [^java.io.File f (or (u/list-files src-dir) [])]
+    (let [dst (str dest-dir u/+separator+ (.getName f))]
+      (if (.isDirectory f)
+        (copy-dir-contents! (.getPath f) dst)
+        (u/copy-file (.getPath f) dst)))))
 
 (defn- update-snapshot-slot-meta!
   [slot-path slot]
@@ -1758,6 +1769,7 @@
    :wal-vec-max-lsn-delta
    :wal-vec-max-buffer-bytes
    :wal-vec-chunk-bytes
+   :wal-replay-missing-dbi-policy
    :lmdb-sync-interval
    :lmdb-sync-interval-ms
    :snapshot-dir
@@ -1818,6 +1830,105 @@
     (doseq [^java.io.File f files]
       (u/copy-file (.getPath f)
                    (str env-dir u/+separator+ (.getName f))))))
+
+(defn- txlog-recovery-work-root
+  [env-dir snapshot]
+  (str env-dir u/+separator+ ".txlog-recovery-"
+       (System/currentTimeMillis) "-"
+       (java.util.UUID/randomUUID) "-"
+       (name (:slot snapshot))))
+
+(defn- txlog-recovery-candidate-opts
+  [reopen-opts candidate-dir]
+  (assoc reopen-opts
+         :wal-dir (str candidate-dir u/+separator+ "txlog")
+         :snapshot-dir (str candidate-dir u/+separator+ "snapshots")
+         :snapshot-scheduler? false
+         :snapshot-bootstrap-force? false))
+
+(defn- copy-txlog-dir!
+  [src-env-dir dest-env-dir]
+  (let [src (str src-env-dir u/+separator+ "txlog")
+        dst (str dest-env-dir u/+separator+ "txlog")]
+    (when (u/file-exists src)
+      (copy-dir-contents! src dst))))
+
+(defn- move-recovery-path-if-exists!
+  [src dst]
+  (when (u/file-exists src)
+    (u/create-dirs (or (some-> (io/file dst) .getParent) dst))
+    (move-dir! src dst)))
+
+(defn- backup-current-recovery-files!
+  [env-dir backup-dir]
+  (u/create-dirs backup-dir)
+  (doseq [file-name txlog-recovery-lmdb-file-names]
+    (move-recovery-path-if-exists!
+     (str env-dir u/+separator+ file-name)
+     (str backup-dir u/+separator+ file-name)))
+  (move-recovery-path-if-exists!
+   (str env-dir u/+separator+ "txlog")
+   (str backup-dir u/+separator+ "txlog")))
+
+(defn- restore-recovery-backup!
+  [env-dir backup-dir]
+  (doseq [file-name txlog-recovery-lmdb-file-names]
+    (let [dst (str env-dir u/+separator+ file-name)]
+      (when (u/file-exists dst)
+        (io/delete-file (io/file dst) true))))
+  (let [txlog-dir (str env-dir u/+separator+ "txlog")]
+    (when (u/file-exists txlog-dir)
+      (u/delete-files txlog-dir)))
+  (doseq [^java.io.File f (or (u/list-files backup-dir) [])]
+    (move-dir! (.getPath f)
+               (str env-dir u/+separator+ (.getName f)))))
+
+(defn- install-recovery-candidate!
+  [env-dir candidate-dir]
+  (doseq [file-name txlog-recovery-lmdb-file-names
+          :let [src (str candidate-dir u/+separator+ file-name)]
+          :when (u/file-exists src)]
+    (u/copy-file src (str env-dir u/+separator+ file-name)))
+  (copy-txlog-dir! candidate-dir env-dir))
+
+(defn- promote-recovery-candidate!
+  [env-dir reopen-opts snapshot cause candidate-dir work-root]
+  (let [backup-dir (str work-root u/+separator+ "pre-recovery")]
+    (backup-current-recovery-files! env-dir backup-dir)
+    (try
+      (install-recovery-candidate! env-dir candidate-dir)
+      (try
+        (let [reopened (txlog-mark-recovery-source!
+                        (l/open-kv env-dir reopen-opts)
+                        snapshot
+                        cause)]
+          (when (u/file-exists candidate-dir)
+            (u/delete-files candidate-dir))
+          reopened)
+        (catch Exception e
+          (restore-recovery-backup! env-dir backup-dir)
+          (throw e)))
+      (catch Exception e
+        (when (u/file-exists backup-dir)
+          (restore-recovery-backup! env-dir backup-dir))
+        (throw e)))))
+
+(defn- validate-snapshot-recovery-candidate!
+  [env-dir reopen-opts snapshot work-root]
+  (let [candidate-dir (str work-root u/+separator+ "candidate")
+        candidate-opts (txlog-recovery-candidate-opts reopen-opts candidate-dir)]
+    (u/create-dirs candidate-dir)
+    (copy-snapshot-lmdb-files! candidate-dir (:path snapshot))
+    (copy-txlog-dir! env-dir candidate-dir)
+    (reset-txlog-runtime-for-snapshot! candidate-dir candidate-opts snapshot)
+    (let [candidate (l/open-kv candidate-dir candidate-opts)]
+      (try
+        true
+        (finally
+          (try
+            (i/close-kv candidate)
+            (catch Exception _)))))
+    candidate-dir))
 
 (defn- scan-txlog-segment-range
   [{:keys [id file]}]
@@ -1921,11 +2032,8 @@
   [e]
   (loop [t e]
     (if t
-      (let [typ (:type (ex-data t))
-            msg (.getMessage ^Throwable t)]
-        (if (or (contains? txlog-recovery-fallback-types typ)
-                (and (keyword? typ) (= "txlog" (namespace typ)))
-                (and (string? msg) (.contains ^String msg "Txn-log")))
+      (let [typ (:type (ex-data t))]
+        (if (contains? txlog-recovery-fallback-types typ)
           true
           (recur (.getCause ^Throwable t))))
       false)))
@@ -1942,6 +2050,22 @@
             (or (:type (ex-data cause))
                 :unknown)))
   db)
+
+(def ^:private txlog-replay-missing-dbi-policies
+  #{:error :open-default})
+
+(defn- txlog-replay-missing-dbi-policy
+  [lmdb]
+  (let [policy (or (:wal-replay-missing-dbi-policy (i/env-opts lmdb))
+                   :error)]
+    (if (contains? txlog-replay-missing-dbi-policies policy)
+      policy
+      :error)))
+
+(defn- txlog-note-replay-warning!
+  [lmdb warning]
+  (when-let [info-v (i/kv-info lmdb)]
+    (vswap! info-v update :txlog-replay-warnings (fnil conj []) warning)))
 
 (defn- recover-from-snapshot-open!
   [db cause]
@@ -1965,18 +2089,26 @@
           (loop [[snapshot & more] snapshots
                  failures []]
             (if snapshot
-              (let [attempt
+              (let [work-root (txlog-recovery-work-root env-dir snapshot)
+                    attempt
                     (try
-                      (copy-snapshot-lmdb-files! env-dir (:path snapshot))
-                      (reset-txlog-runtime-for-snapshot! env-dir
-                                                         reopen-opts
-                                                         snapshot)
-                      {:reopened
-                       (txlog-mark-recovery-source!
-                        (l/open-kv env-dir reopen-opts)
-                        snapshot
-                        cause)}
+                      (let [candidate-dir
+                            (validate-snapshot-recovery-candidate!
+                             env-dir
+                             reopen-opts
+                             snapshot
+                             work-root)]
+                        {:reopened
+                         (promote-recovery-candidate!
+                          env-dir
+                          reopen-opts
+                          snapshot
+                          cause
+                          candidate-dir
+                          work-root)})
                       (catch Exception e
+                        (when (u/file-exists work-root)
+                          (u/delete-files work-root))
                         {:error e}))]
                 (if-let [reopened (:reopened attempt)]
                   reopened
@@ -1998,10 +2130,19 @@
         (i/get-dbi lmdb dbi-name false)
         (catch Exception _
           nil))
-      (let [opts (or (get-in info [:dbis dbi-name])
-                     (raise "DBI is not available for txn-log replay"
-                            {:dbi dbi-name :type :txlog/replay-missing-dbi}))]
-        (i/open-dbi lmdb dbi-name opts))))
+      (if-let [opts (get-in info [:dbis dbi-name])]
+        (i/open-dbi lmdb dbi-name opts)
+        (case (txlog-replay-missing-dbi-policy lmdb)
+          :open-default
+          (do
+            (txlog-note-replay-warning!
+             lmdb
+             {:type :txlog/replay-missing-dbi-open-default
+              :dbi dbi-name})
+            (i/open-dbi lmdb dbi-name))
+
+          (raise "DBI is not available for txn-log replay"
+                 {:dbi dbi-name :type :txlog/replay-missing-dbi})))))
 
 (defn- replay-note-kv-info-update!
   [info-v ^datalevin.lmdb.KVTxData tx]
@@ -3492,6 +3633,27 @@
 
 (declare wrap-lmdb)
 
+(defn- txlog-log-dbi-registration!
+  [wrapped raw-db dbi-name before after]
+  (when (and (not= dbi-name c/kv-info)
+             (not= before after)
+             (txlog-write-path-enabled? raw-db))
+    (i/transact-kv wrapped
+                   c/kv-info
+                   [[:put [:dbis dbi-name] after]]
+                   [:keyword :string]
+                   :data)))
+
+(defn- txlog-log-dbi-drop!
+  [wrapped raw-db dbi-name before]
+  (when (and (not= dbi-name c/kv-info)
+             (some? before)
+             (txlog-write-path-enabled? raw-db))
+    (i/transact-kv wrapped
+                   c/kv-info
+                   [[:del [:dbis dbi-name]]]
+                   [:keyword :string])))
+
 (deftype KVLMDB [db]
   l/IWriting
   (writing? [_] (l/writing? db))
@@ -3703,7 +3865,13 @@
   (copy [this a0] (.copy this a0 false))
   (copy [this a0 a1] (txlog-copy-with-backup-pin! this db a0 a1))
   (dbi-opts [this a0] (i/dbi-opts db a0))
-  (drop-dbi [this a0] (i/drop-dbi db a0))
+  (drop-dbi [this a0]
+    (let [before (try
+                   (i/dbi-opts db a0)
+                   (catch Exception _ nil))
+          res (i/drop-dbi db a0)]
+      (txlog-log-dbi-drop! this db a0 before)
+      res))
   (entries [this a0] (i/entries db a0))
   (env-dir [this] (i/env-dir db))
   (kv-info [this] (i/kv-info db))
@@ -3747,10 +3915,26 @@
   (key-range-list-count [this a0 a1 a2] (i/key-range-list-count db a0 a1 a2))
   (list-dbis [this] (i/list-dbis db))
   (max-val-size [this] (i/max-val-size db))
-  (open-dbi [this a0] (i/open-dbi db a0))
-  (open-dbi [this a0 a1] (i/open-dbi db a0 a1))
-  (open-list-dbi [this a0] (i/open-list-dbi db a0))
-  (open-list-dbi [this a0 a1] (i/open-list-dbi db a0 a1))
+  (open-dbi [this a0]
+    (.open-dbi this a0 nil))
+  (open-dbi [this a0 a1]
+    (let [before (try
+                   (i/dbi-opts db a0)
+                   (catch Exception _ nil))
+          res (i/open-dbi db a0 a1)
+          after (i/dbi-opts db a0)]
+      (txlog-log-dbi-registration! this db a0 before after)
+      res))
+  (open-list-dbi [this a0]
+    (.open-list-dbi this a0 nil))
+  (open-list-dbi [this a0 a1]
+    (let [before (try
+                   (i/dbi-opts db a0)
+                   (catch Exception _ nil))
+          res (i/open-list-dbi db a0 a1)
+          after (i/dbi-opts db a0)]
+      (txlog-log-dbi-registration! this db a0 before after)
+      res))
   (range-count [this a0 a1] (i/range-count db a0 a1))
   (range-count [this a0 a1 a2] (i/range-count db a0 a1 a2))
   (range-filter [this a0 a1 a2] (i/range-filter db a0 a1 a2))

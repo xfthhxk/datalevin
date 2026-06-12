@@ -266,11 +266,17 @@
         meta*     (meta entity)
         new-datom (cond-> (datom e a nv' tx)
                     meta* (with-meta meta*))]
-    (if (= (.-v old-datom) nv')
+    (cond
+      (nil? old-datom)
+      (transact-report report new-datom)
+
+      (= (.-v old-datom) nv')
       (if (some #(and (not (datom-added %)) (= % new-datom))
                 (:tx-data report))
         (transact-report report new-datom)
         (update report ::tx-redundant conjv new-datom))
+
+      :else
       (let [report' (transact-report report
                                      (datom e a (.-v old-datom) tx false))]
         (transact-report report' new-datom)))))

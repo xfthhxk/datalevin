@@ -586,7 +586,7 @@
    (idoc-match db arg1 arg2 nil))
   ([^DB db arg1 arg2 arg3]
    (let [^Store store (.-store db)
-         indices      (.-idoc-indices store)
+         indices      (st/store-idoc-indices store)
          attr?        (keyword? arg1)
          domains0     (if attr?
                         [(idoc-domain store arg1)]
