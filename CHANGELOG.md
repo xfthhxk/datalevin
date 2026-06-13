@@ -9,6 +9,9 @@
 - [Datalog] `fill-db` refreshes read caches after bulk load, and the query
   optimizer verifies zero cardinality estimates before pruning
   [#371](https://github.com/datalevin/datalevin/issues/371).
+- [Datalog] Retracting and reasserting entities with ref-component composite
+  tuple identities no longer creates partial `[nil ...]` tuple values
+  [#372](https://github.com/datalevin/datalevin/issues/372).
 
 
 ## 0.10.18 (2026-05-27)

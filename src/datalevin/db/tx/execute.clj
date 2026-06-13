@@ -118,14 +118,12 @@
             (update :eavt del)
             (update :avet del))))))
 
+(declare effective-attr-value)
+
 (defn- queue-tuple
-  [queue tuple idx db e _ v]
+  [queue tuple idx report db e _ v]
   (let [tuple-value  (or (get queue tuple)
-                         (:v (sf
-                               (.subSet ^TreeSortedSet (:eavt db)
-                                        (d/datom e tuple nil tx0)
-                                        (d/datom e tuple nil txmax))))
-                         (ea-first-v (:store db) e tuple)
+                         (effective-attr-value report db e tuple)
                          (vec (repeat (-> (schema (:store db))
                                           (get tuple)
                                           :db/tupleAttrs
@@ -135,10 +133,10 @@
     (assoc queue tuple tuple-value')))
 
 (defn- queue-tuples
-  [queue tuples db e a v]
+  [queue tuples report db e a v]
   (reduce-kv
     (fn [queue tuple idx]
-      (queue-tuple queue tuple idx db e a v))
+      (queue-tuple queue tuple idx report db e a v))
     queue
     tuples))
 
@@ -154,7 +152,7 @@
             v      (if (datom-added datom) (:v datom) nil)
             queue  (or (-> report' ::queued-tuples (get e)) {})
             tuples (get (txcommon/attrs-by db :db/attrTuples) a)
-            queue' (queue-tuples queue tuples db e a v)]
+            queue' (queue-tuples queue tuples report' db e a v)]
         (update report' ::queued-tuples assoc e queue'))
       report')))
 

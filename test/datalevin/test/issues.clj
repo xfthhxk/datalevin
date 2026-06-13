@@ -91,6 +91,58 @@
           (d/close-db db))
         (u/delete-files dir)))))
 
+(deftest issue-372-ref-tuple-retract-reassert
+  (let [schema {:parent/id    {:db/valueType :db.type/long
+                               :db/unique    :db.unique/identity}
+                :child/parent {:db/valueType :db.type/ref}
+                :child/n      {:db/valueType :db.type/long}
+                :child/p+n    {:db/tupleAttrs [:child/parent :child/n]
+                               :db/unique     :db.unique/identity}}
+        create (fn [^long offset ^long n]
+                 (vec (concat (mapv (fn [^long i]
+                                       {:parent/id (+ offset i)})
+                                     (range n))
+                              (mapv (fn [^long i]
+                                      {:child/parent [:parent/id (+ offset i)]
+                                       :child/n      0})
+                                    (range n)))))
+        old-eids (fn [db]
+                   (concat (mapv first
+                                 (d/q '[:find ?e :where [?e :child/n _]]
+                                      db))
+                           (mapv first
+                                 (d/q '[:find ?e :where [?e :parent/id _]]
+                                      db))))
+        assert-tuples (fn [db n]
+                        (let [values (mapv :v (d/datoms db :ave :child/p+n))]
+                          (is (= n (count values)))
+                          (is (every? (comp some? first) values))))]
+    (testing "separate committed retract and reassert transactions"
+      (let [dir  (u/tmp-dir (str "issue-372-separate-" (UUID/randomUUID)))
+            conn (d/get-conn dir schema)]
+        (try
+          (d/transact! conn (create 0 2))
+          (d/transact! conn (mapv (fn [e] [:db/retractEntity e])
+                                  (old-eids @conn)))
+          (is (empty? (d/datoms @conn :ave :child/p+n)))
+          (d/transact! conn (create 100 2))
+          (assert-tuples @conn 2)
+          (finally
+            (d/close conn)
+            (u/delete-files dir)))))
+    (testing "same transaction retract and reassert"
+      (let [dir  (u/tmp-dir (str "issue-372-same-tx-" (UUID/randomUUID)))
+            conn (d/get-conn dir schema)]
+        (try
+          (d/transact! conn (create 0 2))
+          (d/transact! conn (vec (concat (map (fn [e] [:db/retractEntity e])
+                                              (old-eids @conn))
+                                         (create 100 2))))
+          (assert-tuples @conn 2)
+          (finally
+            (d/close conn)
+            (u/delete-files dir)))))))
+
 (deftest issue-366-stale-cursor-after-reader-close
   (let [dir    (u/tmp-dir (str "stale-reader-cursor-" (UUID/randomUUID)))
         schema {:name {:db/valueType   :db.type/string
